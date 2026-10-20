@@ -1,17 +1,18 @@
 # RAPHAEL — AI Agent Runtime Security Gateway
 
-RAPHAEL is a runtime security gateway designed to protect AI agent execution by enforcing security policies across user inputs, tool selection, argument validation, multi-step behavioral action sequences, execution boundaries, and audit logging.
+RAPHAEL is a runtime security gateway designed to protect AI agent execution by enforcing security policies across user inputs, tool selection, argument validation, multi-step behavioral action sequences, tool execution results, and model responses.
 
 ---
 
 ## 1. Project Purpose & Scope
 
-AI agents equipped with tool-calling capabilities present significant security risks, including prompt injection, unauthorized privilege escalation, path traversal, arbitrary code execution, and multi-step data exfiltration.
+AI agents equipped with tool-calling capabilities present significant security risks, including prompt injection, unauthorized privilege escalation, path traversal, arbitrary code execution, multi-step data exfiltration, and unauthorized data disclosure.
 
 RAPHAEL places a multi-layered security boundary around both the LLM and the tools it attempts to execute:
 1. **Input Firewall (Phase 2)**: Intercepts malicious directives, jailbreaks, and prompt injections before the agent is invoked.
 2. **Central Tool Firewall (Phase 3)**: Validates arguments against strict Pydantic schemas, enforces least privilege, requires explicit user confirmation for high-impact tools, and sandboxes execution.
 3. **Behavioral Risk Engine (Phase 4)**: Correlates user intent, action history, data sensitivity, and tool chaining to detect multi-step anomalies and exfiltration attacks before tools execute.
+4. **Output Firewall & Data Loss Prevention (Phase 5)**: Intercepts tool results before they enter the model reasoning context, tracks data provenance, detects sensitive data (credentials, SSNs, private keys, confidential records), and inspects final agent responses before release to API clients.
 
 ---
 
@@ -23,8 +24,8 @@ RAPHAEL places a multi-layered security boundary around both the LLM and the too
 | **Phase 2** | Input Security Firewall | **COMPLETED** | Regex-based injection detection, risk scoring (0–100), policy decisions (`ALLOW`, `MONITOR`, `CONFIRM`, `BLOCK`) |
 | **Phase 3** | Tool Firewall & Controlled Execution | **COMPLETED** | Central tool registry, Pydantic argument validation, least-privilege authorization, confirmation enforcement, safe execution sandbox, agent loop with iteration & tool call limits, FastAPI REST API (`/health`, `/inspect`, `/chat`), and structured audit logging |
 | **Phase 4** | Behavioral Risk Engine | **COMPLETED** | Cross-stage correlation between user intent, session action history, target data sensitivity, and tool chaining; multi-indicator explainable risk scoring; security invariant enforcement; session history isolation |
-| **Phase 5** | Dedicated Output Firewall | *Future Work* | Data Loss Prevention (DLP), output token sanitization, and PII/secret scrubbing before user delivery |
-| **Phase 6** | Enterprise Policy & Evaluation | *Future Work* | Benchmark evaluation against labeled attack datasets, external policy engines, distributed auditing, and RBAC directory integrations |
+| **Phase 5** | Output Firewall & Data Loss Prevention | **COMPLETED** | Two-stage output inspection (pre-LLM tool masking & post-LLM response inspection), deterministic DLP pattern engine, data provenance tracking, least-privilege disclosure policy, and idempotent redaction |
+| **Phase 6** | Full Evaluation & Testing | *Future Work* | Comparative benchmark evaluation (No Firewall vs. Rule Baseline vs. RAPHAEL with Behavioral & Output protection), detection precision/recall, false positive rate, latency overhead, and mitigation reporting |
 
 ---
 
@@ -38,7 +39,8 @@ RAPHAEL places a multi-layered security boundary around both the LLM and the too
                                          v
                          +-------------------------------+
                          |      FastAPI REST Gateway     |
-                         |   (/health, /inspect, /chat)  |
+                         |   (/health, /inspect, /chat,  |
+                         |       /inspect-output)        |
                          +-------------------------------+
                                          |
                                          v
@@ -80,15 +82,32 @@ RAPHAEL places a multi-layered security boundary around both the LLM and the too
                                            v                          v
                              [Halt Action Execution]        [Execute Mock Tool]
                                                                       |
-                                                          Untrusted Result Appended
+                                                                      v
+                                                    +------------------------------------+
+                                                    | Phase 5: Tool Result Inspection    |
+                                                    | (Point A: Redact secrets before    |
+                                                    |  entering LLM context)             |
+                                                    +------------------------------------+
                                                                       |
                                                                       v
-                                                            [Agent Final Answer]
+                                                            [Agent Reasoning Step]
                                                                       |
                                                                       v
-                                                          +------------------------+
-                                                          | Structured Audit Event |
-                                                          +------------------------+
+                                                    +------------------------------------+
+                                                    | Phase 5: Final Response Inspection |
+                                                    | (Point B: Recipient authorization, |
+                                                    |  DLP scanning, and redaction)      |
+                                                    +------------------------------------+
+                                                                    /     \
+                                                              BLOCK         ALLOW / REDACT
+                                                               /               \
+                                                              v                 v
+                                                    [Safe Denial Text]    [Release to Client]
+                                                                      |
+                                                                      v
+                                                           +------------------------+
+                                                           | Structured Audit Event |
+                                                           +------------------------+
 ```
 
 ---
@@ -127,7 +146,65 @@ The engine computes an explainable, deterministic score (0–100) combining conf
 
 ---
 
-## 5. Prerequisites & Local Setup
+## 5. Phase 5: Output Firewall & Data Loss Prevention (DLP)
+
+The Output Firewall is an independently enforced security boundary that prevents unauthorized sensitive data from leaking into the model context or reaching API clients.
+
+### 5.1 DLP Detection Engine (`app/firewall/dlp_detector.py`)
+
+A deterministic, offline-capable scanner detects sensitive patterns and structures:
+- **Social Security Numbers (SSN)**: Standard format `\b\d{3}-\d{2}-\d{4}\b`, excluding non-SSN area codes (`000`, `666`, `900–999` with synthetic fixtures permitted for testing).
+- **API Keys & Credential Tokens**: Prefixes such as `sk-live-`, `sk-ant-`, `ghp_`, `AKIA[0-9A-Z]{16}`, and generic bearer tokens.
+- **Password Assignments**: Assignments like `password = ...`, `api_key = ...`, `secret: ...`.
+- **Private Keys**: Multiline PEM blocks (`-----BEGIN RSA/OPENSSH/EC/PRIVATE KEY-----`).
+- **Employee Confidential Records**: Salary figures (`$140,000`), compensation fields, and mock employee records.
+- **Confidential Files**: File tags and content markers matching `confidential.txt`.
+- **Email Addresses**: Syntactically valid email formats flagged for context-dependent disclosure review.
+
+### 5.2 Data Provenance & Sensitivity Elevation (`app/firewall/data_provenance.py`)
+
+Data sensitivity does not vanish merely because text is summarized, reformatted, or paraphrased by an LLM.
+- **Provenance Tracking**: Each tool invocation creates a `DataProvenance` record capturing the source tool, safe resource identifier (e.g., `file:confidential.txt`, `db:employees`), sensitivity level (`PUBLIC`, `INTERNAL`, `CONFIDENTIAL`, `RESTRICTED`), and trust flag.
+- **Sensitivity Elevation**: As tools execute in a session, cumulative provenance elevates to the highest sensitivity observed (`PUBLIC` < `INTERNAL` < `CONFIDENTIAL` < `RESTRICTED`).
+- **No Raw Secrets in Provenance**: Provenance metadata retains only classifications and safe resource IDs, never secret values.
+
+### 5.3 Deterministic Redaction Engine (`app/firewall/redaction.py`)
+
+- **Right-to-Left Redaction**: Replaces sensitive spans from highest character offset to lowest to prevent offset shifts.
+- **Span Merging**: Overlapping or adjacent sensitive spans are merged into a single canonical marker:
+  - `[REDACTED_SSN]`
+  - `[REDACTED_API_KEY]`
+  - `[REDACTED_PASSWORD]`
+  - `[REDACTED_PRIVATE_KEY]`
+  - `[REDACTED_CONFIDENTIAL_DATA]`
+  - `[REDACTED_EMAIL]`
+- **Idempotence**: Re-running redaction on already redacted text preserves existing markers without double-wrapping.
+- **Structured Redaction**: Recursively redacts strings inside nested JSON dictionaries and lists while preserving safe data types.
+
+### 5.4 Two-Point Output Inspection Architecture (`app/firewall/output_firewall.py`)
+
+Output inspection occurs at two distinct security boundaries:
+1. **Point A: Pre-LLM Tool Result Inspection (`destination="agent_context"`)**:
+   - Authorized tool outputs are scanned before entering the agent's message history.
+   - Raw restricted secrets (SSNs, API keys, private keys) are masked immediately so the LLM reasoning context cannot absorb or parrot them.
+2. **Point B: Post-LLM Final Response Inspection (`destination="api_client"`)**:
+   - The final text generated by the agent is scanned before returning to the caller.
+   - **Authorization-Aware Disclosure Policy**: Callers lacking explicit permissions (`disclose:confidential` or `disclose:restricted`) are denied raw release.
+   - **Read vs. Disclose Separation**: Tool read permissions (`tools:file_read`, `tools:database_read`) grant permission to query resources internally, but **never grant permission to disclose sensitive data externally**.
+   - **Paraphrased Confidential Narrative Handling**: If candidate output derives from confidential or restricted source data but exact regex pattern matches are zero (e.g. summarized or paraphrased narratives), the policy holds the response for explicit user confirmation (`CONFIRM`) or blocks it (`BLOCK`), rather than returning `ALLOW`.
+   - **Fail-Closed Security**: Any unhandled exception during inspection blocks the output and logs an audit failure event.
+
+### 5.5 Server-Issued Single-Use Confirmation Challenges (`app/firewall/confirmation.py`)
+
+To eliminate client-side confirmation forgery:
+- High-risk tool calls and sensitive disclosures generate an unguessable, cryptographically random challenge token bound to the specific action, session ID, and parameters.
+- Client requests must provide this token via `confirmation_token`.
+- Tokens are single-use: upon consumption, they are invalidated immediately, preventing replay attacks.
+- Raw client-supplied confirmation arrays (e.g. `confirmed_actions: ["*"]`) are strictly ignored and rejected.
+
+---
+
+## 6. Prerequisites & Local Setup
 
 ### Requirements
 - Python 3.12+
@@ -148,7 +225,7 @@ python -m venv .venv
 
 ---
 
-## 6. Running the FastAPI Service
+## 7. Running the FastAPI Service
 
 Start the service locally using Uvicorn:
 
@@ -160,29 +237,35 @@ Interactive OpenAPI documentation is available at: `http://127.0.0.1:8000/docs`
 
 ---
 
-## 7. API Endpoints
+## 8. API Endpoints
 
 ### 1. `GET /health`
 Returns service status and dependency readiness (Ollama connectivity).
 
 ### 2. `POST /inspect`
-Runs the input security firewall without querying the LLM or invoking tools.
+Runs the Phase 2 input security firewall without querying the LLM or invoking tools.
 
-### 3. `POST /chat`
-Executes the guarded chat pipeline (Input Firewall ➔ Intent Classification ➔ Agent Loop ➔ Tool Firewall & Behavioral Risk Engine ➔ Audit Event).
+### 3. `POST /inspect-output`
+Directly inspects arbitrary text or structured payloads against the Phase 5 Output Firewall & DLP detector. Public requests strictly enforce `destination="api_client"` (client destination override attempts are ignored). Returns detection categories, risk scores, safe explanations, and redacted output without disclosing raw secrets.
 
-### 4. `GET /behavior/session/{session_id}`
-Inspects chronological behavioral events tracked for a specific session for evaluation and research.
+### 4. `POST /chat`
+Executes the guarded chat pipeline:
+`Input Firewall` ➔ `Intent Classification` ➔ `Agent Loop` ➔ `Tool Firewall & Behavioral Risk Engine` ➔ `Point A Tool Result Inspection` ➔ `LLM Processing` ➔ `Point B Final Response Inspection` ➔ `Audit Logging`.
+Requires server-issued `confirmation_token` to approve halted actions.
+
+### 5. `GET /behavior/session/{session_id}`
+Retrieves tracked behavioral events for a specific session for evaluation and research. Requires research/admin authorization via header:
+`X-RAPHAEL-RESEARCH-TOKEN: raphael-research-internal` (or `Authorization: Bearer <token>`). Unauthenticated requests are rejected with HTTP 403 Forbidden.
 
 ---
 
-## 8. Running Tests
+## 9. Running Tests
 
 The test suite runs entirely offline without requiring a live Ollama server:
 
 ```powershell
-# Run all 55 offline unit and integration tests
-.\.venv\Scripts\pytest.exe -v tests/test_input_firewall.py tests/test_tools.py tests/test_tool_firewall.py tests/test_agent_loop.py tests/test_api.py tests/test_behavioral_engine.py
+# Run all 84 offline unit and integration tests across Phases 1-5
+.\.venv\Scripts\pytest.exe -v --ignore=tests/test_agent.py
 ```
 
 To run the live Ollama agent test:
@@ -192,8 +275,10 @@ To run the live Ollama agent test:
 
 ---
 
-## 9. Current Security Limitations
+## 10. Security Limitations & Disclaimers
 
-1. **Deterministic Baseline Intent Classification**: The current prototype uses a deterministic keyword/syntax taxonomy with explicit confidence scores. More complex semantic intent models can be explored in future milestones.
-2. **In-Memory Session History**: Session histories are bounded and isolated in thread-safe memory. Distributed or persistent session storage is planned for Phase 6.
-3. **Dedicated Output Firewall**: Phase 5 remains responsible for full model output Data Loss Prevention (DLP) and output token filtering.
+1. **Regex & Deterministic DLP Heuristics**: Deterministic pattern matching cannot guarantee detection of all obfuscated, encoded, or novel secret formats. It serves as a high-speed baseline.
+2. **Conservative Provenance Propagation**: Provenance tracking elevates sensitivity based on session history and resource IDs. Unstructured narratives deriving from confidential provenance without exact regex matches are gated by confirmation.
+3. **In-Memory Session & Challenge Storage**: Recipient permissions, confirmation challenge tokens, and session histories are simulated in memory for prototype research. Production deployment requires distributed key-value stores and enterprise IAM / OAuth2 token verification.
+4. **Not a Certified Enterprise DLP**: RAPHAEL is a research-oriented security gateway designed to study defense-in-depth for AI agents.
+5. **Phase 6 Scope**: Comprehensive benchmarking, metrics evaluation (precision, recall, false-positive rate, latency overhead), and attack dataset testing remain the focus of Phase 6.

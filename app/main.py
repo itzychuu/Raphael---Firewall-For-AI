@@ -2,6 +2,8 @@ import datetime
 import logging
 import uuid
 from typing import Any, Dict
+import os
+import secrets
 import requests
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -10,7 +12,11 @@ from fastapi.responses import JSONResponse
 from app.agent.agent import OLLAMA_URL, run_agent_loop
 from app.firewall.audit import get_audit_events, log_audit_event
 from app.firewall.behavior_models import BehavioralEvent, BehavioralEventType
+from app.firewall.confirmation import get_challenge_info, validate_and_consume_challenge
+from app.firewall.dlp_detector import scan_data_for_dlp
 from app.firewall.gateway import inspect_input
+from app.firewall.output_firewall import inspect_output
+from app.firewall.redaction import redact_structured_data
 from app.firewall.session_history import session_history
 from app.models.schemas import (
     AuditEventType,
@@ -20,6 +26,8 @@ from app.models.schemas import (
     HealthResponse,
     InspectRequest,
     InspectResponse,
+    OutputInspectRequest,
+    OutputInspectResponse,
     SecurityContext,
 )
 
@@ -162,9 +170,49 @@ def chat_endpoint(payload: ChatRequest):
             reason=inspection["reason"] or "Elevated risk input detected",
         )
 
-    # Step 3: Prepare Security Context
+    # Step 3: Prepare Security Context with Server-Verified Confirmations
+    verified_confirmations = []
+    verified_disclosures = []
+    if payload.confirmation_token:
+        challenge = get_challenge_info(payload.confirmation_token)
+        if challenge and validate_and_consume_challenge(
+            token=payload.confirmation_token,
+            action=challenge.action,
+            session_id=corr_id,
+            parameters=challenge.parameters,
+        ):
+            if challenge.action == "disclose_confidential":
+                res = challenge.parameters.get("resource")
+                if res:
+                    verified_disclosures.append(res)
+            else:
+                verified_confirmations.append(challenge.action)
+                if challenge.action == "send_email" and "recipient" in challenge.parameters:
+                    verified_confirmations.append(f"send_email:{challenge.parameters['recipient']}")
+        else:
+            log_audit_event(
+                event_type=AuditEventType.SECURITY_ERROR,
+                policy_decision=Decision.BLOCK,
+                outcome="invalid_or_replayed_confirmation_token",
+                risk_score=75,
+                correlation_id=corr_id,
+                details={"provided_token": payload.confirmation_token[:8] + "..."},
+            )
+
+    # Note: Client-supplied confirmed_actions are strictly rejected for confirmation bypass
+    if payload.confirmed_actions:
+        log_audit_event(
+            event_type=AuditEventType.SECURITY_ERROR,
+            policy_decision=Decision.BLOCK,
+            outcome="untrusted_client_confirmed_actions_ignored",
+            risk_score=70,
+            correlation_id=corr_id,
+            details={"ignored_actions": payload.confirmed_actions},
+        )
+
     security_context = SecurityContext(
-        confirmed_actions=payload.confirmed_actions or [],
+        confirmed_actions=verified_confirmations,
+        confirmed_disclosures=verified_disclosures,
     )
 
     # Step 4: Controlled Agent Execution
@@ -194,28 +242,87 @@ def chat_endpoint(payload: ChatRequest):
             reason="Agent execution failure",
         )
 
-    # Step 5: Format response based on agent outcome
+    # Step 5: Format and sanitize response based on agent outcome
     agent_status = agent_result.get("status", "success")
     decision_str = agent_result.get("decision", Decision.ALLOW.value)
     final_decision = Decision(decision_str) if decision_str in Decision._value2member_map_ else Decision.ALLOW
+
+    # Sanitize tool_calls arguments so sensitive data (SSNs, credentials) never leaks in auxiliary fields
+    sanitized_tool_calls = []
+    for tc in agent_result.get("tool_calls", []):
+        tc_copy = dict(tc)
+        if "arguments" in tc_copy and isinstance(tc_copy["arguments"], dict):
+            _, arg_findings = scan_data_for_dlp(tc_copy["arguments"])
+            if arg_findings:
+                tc_copy["arguments"] = redact_structured_data(tc_copy["arguments"], arg_findings)
+        sanitized_tool_calls.append(tc_copy)
 
     return ChatResponse(
         status=agent_status,
         response=agent_result.get("response", ""),
         decision=final_decision,
         risk=agent_result.get("risk", risk_score),
-        tool_calls=agent_result.get("tool_calls", []),
+        tool_calls=sanitized_tool_calls,
         audit_id=corr_id,
         reason=agent_result.get("error") or agent_result.get("reason"),
+        confirmation_token=agent_result.get("confirmation_token"),
+        output_inspection=agent_result.get("output_inspection"),
     )
 
 
 @app.get("/behavior/session/{session_id}")
-def get_session_behavior(session_id: str):
-    """Retrieve tracked behavioral events for a specific session (for evaluation and research)."""
+def get_session_behavior(session_id: str, request: Request):
+    """Retrieve tracked behavioral events for a specific session (requires research/admin authorization)."""
+    expected_token = os.getenv("RAPHAEL_RESEARCH_TOKEN")
+    if not expected_token:
+        # Fail-closed: when no research token is configured, the endpoint is disabled
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Research endpoint disabled: RAPHAEL_RESEARCH_TOKEN is not configured.",
+        )
+
+    auth_header = request.headers.get("X-RAPHAEL-RESEARCH-TOKEN") or request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized: Missing research authorization token.",
+        )
+
+    candidate = auth_header[7:].strip() if auth_header.startswith("Bearer ") else auth_header.strip()
+    if not secrets.compare_digest(candidate, expected_token.strip()):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized: Invalid research token.",
+        )
+
     events = session_history.get_session_events(session_id)
     return {
         "session_id": session_id,
         "event_count": len(events),
         "events": [event.model_dump() for event in events],
     }
+
+
+@app.post("/inspect-output", response_model=OutputInspectResponse)
+def inspect_output_endpoint(payload: OutputInspectRequest):
+    """Inspect text content for sensitive data and evaluate disclosure policy.
+    Public endpoint strictly enforces destination='api_client'; client-controlled destinations are ignored.
+    This endpoint operates strictly as an unprivileged, stateless detector without provenance or authorization grants.
+    """
+    result = inspect_output(
+        content=payload.content,
+        security_context=SecurityContext(),  # Strictly unprivileged default context
+        destination="api_client",             # Strictly public client destination
+        provenance=None,                      # Client-supplied provenance is untrusted
+    )
+    return OutputInspectResponse(
+        inspection_id=result.inspection_id,
+        destination=result.destination,
+        decision=result.decision,
+        risk_score=result.risk_score,
+        detected_sensitivity=result.detected_sensitivity,
+        findings_count=len(result.findings),
+        explanation=result.explanation,
+        redacted_content=result.redacted_content,
+        release_permitted=result.release_permitted,
+    )

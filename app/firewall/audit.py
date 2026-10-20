@@ -50,7 +50,7 @@ def mask_sensitive_data(data: Any) -> Any:
 
 def log_audit_event(
     event_type: AuditEventType,
-    policy_decision: Decision,
+    policy_decision: Any,
     outcome: str,
     risk_score: int = 0,
     correlation_id: Optional[str] = None,
@@ -60,6 +60,7 @@ def log_audit_event(
 ) -> AuditEvent:
     """Construct, sanitize, log, and store an audit event."""
     sanitized_details = mask_sensitive_data(details) if details else None
+    dec_str = policy_decision.value if hasattr(policy_decision, "value") else str(policy_decision)
 
     event = AuditEvent(
         audit_id=str(uuid.uuid4()),
@@ -69,7 +70,7 @@ def log_audit_event(
         user_id=user_id,
         tool_name=tool_name,
         risk_score=risk_score,
-        policy_decision=policy_decision,
+        policy_decision=dec_str,
         outcome=outcome,
         details=sanitized_details,
     )

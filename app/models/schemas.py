@@ -31,6 +31,11 @@ class AuditEventType(str, Enum):
     TOOL_VALIDATION_ERROR = "tool_validation_error"
     AGENT_RUN = "agent_run"
     SECURITY_ERROR = "security_error"
+    OUTPUT_INSPECTED = "output_inspected"
+    SENSITIVE_DATA_DETECTED = "sensitive_data_detected"
+    OUTPUT_REDACTED = "output_redacted"
+    OUTPUT_BLOCKED = "output_blocked"
+    OUTPUT_CONFIRMATION_REQUIRED = "output_confirmation_required"
 
 
 class SecurityContext(BaseModel):
@@ -48,12 +53,20 @@ class SecurityContext(BaseModel):
         ]
     )
     confirmed_actions: List[str] = Field(default_factory=list)
+    confirmed_disclosures: List[str] = Field(default_factory=list)
 
     def has_permission(self, permission: str) -> bool:
         return permission in self.permissions or "*" in self.permissions
 
     def is_action_confirmed(self, action_id: str) -> bool:
-        return action_id in self.confirmed_actions or "*" in self.confirmed_actions
+        if not action_id or action_id == "*":
+            return False
+        return action_id in self.confirmed_actions
+
+    def is_disclosure_confirmed(self, resource_id: str) -> bool:
+        if not resource_id or resource_id == "*":
+            return False
+        return resource_id in self.confirmed_disclosures
 
 
 # Tool Argument Schemas
@@ -157,7 +170,7 @@ class AuditEvent(BaseModel):
     user_id: Optional[str] = None
     tool_name: Optional[str] = None
     risk_score: int = 0
-    policy_decision: Decision
+    policy_decision: str
     outcome: str
     details: Optional[Dict[str, Any]] = None
 
@@ -178,6 +191,7 @@ class InspectResponse(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=5000)
     confirmed_actions: Optional[List[str]] = Field(default_factory=list)
+    confirmation_token: Optional[str] = None
     correlation_id: Optional[str] = None
 
 
@@ -189,10 +203,80 @@ class ChatResponse(BaseModel):
     tool_calls: List[Dict[str, Any]] = Field(default_factory=list)
     audit_id: Optional[str] = None
     reason: Optional[str] = None
+    confirmation_token: Optional[str] = None
+    output_inspection: Optional[Dict[str, Any]] = None
 
 
 class HealthResponse(BaseModel):
     status: str
     service: str = "RAPHAEL Gateway"
-    version: str = "0.3.0"
+    version: str = "0.5.0"
     dependencies: Dict[str, Any]
+
+
+# Phase 5 Output Firewall Schemas
+class OutputDecision(str, Enum):
+    ALLOW = "ALLOW"
+    REDACT = "REDACT"
+    CONFIRM = "CONFIRM"
+    BLOCK = "BLOCK"
+
+
+class DLPFindingCategory(str, Enum):
+    SSN = "SSN"
+    API_KEY = "API_KEY"
+    PASSWORD = "PASSWORD"
+    PRIVATE_KEY = "PRIVATE_KEY"
+    EMPLOYEE_RECORD = "EMPLOYEE_RECORD"
+    CONFIDENTIAL_FILE = "CONFIDENTIAL_FILE"
+    EMAIL_ADDRESS = "EMAIL_ADDRESS"
+
+
+class DLPFinding(BaseModel):
+    category: DLPFindingCategory
+    start: int
+    end: int
+    matched_text_length: int
+    sensitivity: str
+    description: str
+
+
+class DataProvenance(BaseModel):
+    provenance_id: str
+    source_tool: Optional[str] = None
+    source_resource: Optional[str] = None
+    session_id: Optional[str] = None
+    sensitivity: str
+    required_permission: Optional[str] = None
+    is_trusted: bool = False
+    disclosure_policy: Optional[str] = None
+
+
+class OutputInspectionResult(BaseModel):
+    inspection_id: str
+    destination: str
+    decision: OutputDecision
+    risk_score: int = 0
+    detected_sensitivity: str
+    findings: List[DLPFinding] = Field(default_factory=list)
+    explanation: str
+    redacted_content: Optional[Any] = None
+    provenance: Optional[DataProvenance] = None
+    release_permitted: bool = False
+
+
+class OutputInspectRequest(BaseModel):
+    content: str = Field(..., min_length=1)
+    destination: str = "api_client"
+
+
+class OutputInspectResponse(BaseModel):
+    inspection_id: str
+    destination: str
+    decision: OutputDecision
+    risk_score: int
+    detected_sensitivity: str
+    findings_count: int
+    explanation: str
+    redacted_content: Optional[str] = None
+    release_permitted: bool

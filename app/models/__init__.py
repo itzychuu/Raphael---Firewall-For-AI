@@ -15,6 +15,13 @@ from app.models.schemas import (
     ChatRequest,
     ChatResponse,
     HealthResponse,
+    OutputDecision,
+    DLPFindingCategory,
+    DLPFinding,
+    DataProvenance,
+    OutputInspectionResult,
+    OutputInspectRequest,
+    OutputInspectResponse,
 )
 
 __all__ = [
@@ -34,4 +41,11 @@ __all__ = [
     "ChatRequest",
     "ChatResponse",
     "HealthResponse",
+    "OutputDecision",
+    "DLPFindingCategory",
+    "DLPFinding",
+    "DataProvenance",
+    "OutputInspectionResult",
+    "OutputInspectRequest",
+    "OutputInspectResponse",
 ]

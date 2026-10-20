@@ -8,12 +8,17 @@ import requests
 
 from app.firewall.audit import log_audit_event
 from app.firewall.behavior_models import BehavioralEvent, BehavioralEventType
+from app.firewall.data_provenance import create_tool_provenance, elevate_provenance
 from app.firewall.intent import classify_intent
+from app.firewall.output_firewall import inspect_output
 from app.firewall.session_history import session_history
+from app.firewall.confirmation import create_confirmation_challenge
 from app.firewall.tool_firewall import execute_tool, tool_registry
 from app.models.schemas import (
     AuditEventType,
+    DataProvenance,
     Decision,
+    OutputDecision,
     SecurityContext,
     ToolExecutionResult,
     ToolExecutionStatus,
@@ -173,6 +178,7 @@ def run_agent_loop(
     ]
 
     tool_call_history: List[Dict[str, Any]] = []
+    session_provenances: List[DataProvenance] = []
     iteration_count = 0
     tool_call_count = 0
 
@@ -204,15 +210,57 @@ def run_agent_loop(
 
         parsed_action = parse_model_action(response_text)
 
-        # Final answer reached
+        # Final answer reached: inspect output before client release
         if parsed_action.get("action") == "final_answer":
+            raw_answer = parsed_action.get("response", "")
+            combined_prov = elevate_provenance(session_provenances, default_session=sid)
+            final_inspection = inspect_output(
+                content=raw_answer,
+                security_context=context,
+                provenance=combined_prov,
+                destination="api_client",
+                session_id=sid,
+            )
+
+            if final_inspection.decision == OutputDecision.BLOCK:
+                return {
+                    "status": "blocked",
+                    "user_input": user_input,
+                    "response": "The response was blocked by the output security policy.",
+                    "tool_calls": tool_call_history,
+                    "decision": Decision.BLOCK.value,
+                    "risk": max(final_inspection.risk_score, 76),
+                    "output_inspection": final_inspection.model_dump(),
+                }
+
+            if final_inspection.decision == OutputDecision.CONFIRM:
+                res_name = final_inspection.provenance.source_resource if final_inspection.provenance and final_inspection.provenance.source_resource else "confidential_source"
+                challenge_token = create_confirmation_challenge(
+                    action="disclose_confidential",
+                    session_id=sid,
+                    parameters={"resource": res_name},
+                )
+                return {
+                    "status": "confirmation_required",
+                    "user_input": user_input,
+                    "response": final_inspection.explanation,
+                    "tool_calls": tool_call_history,
+                    "decision": Decision.CONFIRM.value,
+                    "risk": final_inspection.risk_score,
+                    "confirmation_token": challenge_token,
+                    "output_inspection": final_inspection.model_dump(),
+                }
+
+            safe_answer = final_inspection.redacted_content if final_inspection.decision == OutputDecision.REDACT and final_inspection.redacted_content is not None else raw_answer
+
             return {
                 "status": "success",
                 "user_input": user_input,
-                "response": parsed_action.get("response", ""),
+                "response": safe_answer,
                 "tool_calls": tool_call_history,
                 "decision": Decision.ALLOW.value,
-                "risk": 0,
+                "risk": final_inspection.risk_score,
+                "output_inspection": final_inspection.model_dump(),
             }
 
         # Model requested a tool invocation
@@ -268,6 +316,11 @@ def run_agent_loop(
 
             # If confirmation required: HALT loop immediately! Do not execute.
             if execution_result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED:
+                challenge_token = create_confirmation_challenge(
+                    action=tool_name,
+                    session_id=sid,
+                    parameters=raw_arguments,
+                )
                 return {
                     "status": "confirmation_required",
                     "user_input": user_input,
@@ -279,6 +332,7 @@ def run_agent_loop(
                     "decision": Decision.CONFIRM.value,
                     "risk": execution_result.risk,
                     "required_action": tool_name,
+                    "confirmation_token": challenge_token,
                 }
 
             # If blocked or unauthorized: HALT loop or report refusal
@@ -302,12 +356,50 @@ def run_agent_loop(
                 })
                 continue
 
-            # Successful execution: feed tool result back as untrusted data
-            result_payload = execution_result.result
+            # Create provenance record for executed tool
+            tool_prov = create_tool_provenance(tool_name, raw_arguments, session_id=sid)
+            session_provenances.append(tool_prov)
+
+            # Inspect tool result before appending to LLM reasoning context
+            tool_inspection = inspect_output(
+                content=execution_result.result,
+                security_context=context,
+                provenance=tool_prov,
+                destination="agent_context",
+                session_id=sid,
+            )
+
+            if tool_inspection.decision == OutputDecision.BLOCK:
+                safe_payload_str = json.dumps({"status": "blocked", "message": "Tool result blocked by output security policy."})
+            elif tool_inspection.decision == OutputDecision.CONFIRM:
+                # Halt loop: never expose unconfirmed tool results to LLM reasoning context
+                challenge_token = create_confirmation_challenge(
+                    action=f"tool_result:{tool_name}",
+                    session_id=sid,
+                    parameters=raw_arguments,
+                )
+                return {
+                    "status": "confirmation_required",
+                    "user_input": user_input,
+                    "response": f"Tool result for '{tool_name}' requires confirmation: {tool_inspection.explanation}",
+                    "tool_calls": tool_call_history,
+                    "decision": Decision.CONFIRM.value,
+                    "risk": tool_inspection.risk_score,
+                    "confirmation_token": challenge_token,
+                    "output_inspection": tool_inspection.model_dump(),
+                }
+            elif tool_inspection.decision == OutputDecision.REDACT and tool_inspection.redacted_content is not None:
+                safe_payload_str = json.dumps(tool_inspection.redacted_content) if isinstance(tool_inspection.redacted_content, (dict, list)) else str(tool_inspection.redacted_content)
+            elif tool_inspection.decision == OutputDecision.ALLOW and tool_inspection.release_permitted is True:
+                safe_payload_str = json.dumps(execution_result.result) if isinstance(execution_result.result, (dict, list)) else str(execution_result.result)
+            else:
+                # Fail-closed for unknown decisions or release_permitted=False
+                safe_payload_str = json.dumps({"status": "blocked", "message": "Tool result held due to unverified security policy."})
+
             messages.append({"role": "assistant", "content": response_text})
             messages.append({
                 "role": "user",
-                "content": f"[Untrusted Tool Result for {tool_name}]: {json.dumps(result_payload)}",
+                "content": f"[Untrusted Tool Result for {tool_name}]: {safe_payload_str}",
             })
 
     # Loop iteration limit reached

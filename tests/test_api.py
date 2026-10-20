@@ -158,8 +158,9 @@ def test_chat_internal_agent_failure_safe_handling():
         assert "Uncaught LLM thread failure" not in data["response"]
 
 
-def test_behavior_session_endpoint():
-    """Verify that /behavior/session/{session_id} returns tracked behavioral events."""
+def test_behavior_session_endpoint(monkeypatch):
+    """Verify that /behavior/session/{session_id} returns tracked behavioral events with research auth."""
+    monkeypatch.setenv("RAPHAEL_RESEARCH_TOKEN", "test-research-token-123")
     sid = "api_session_123"
     # Execute a blocked request with correlation_id=sid
     resp = client.post(
@@ -171,8 +172,11 @@ def test_behavior_session_endpoint():
     )
     assert resp.status_code == 200
 
-    # Query behavioral events for this session
-    session_resp = client.get(f"/behavior/session/{sid}")
+    # Query behavioral events for this session with research authorization
+    session_resp = client.get(
+        f"/behavior/session/{sid}",
+        headers={"X-RAPHAEL-RESEARCH-TOKEN": "test-research-token-123"},
+    )
     assert session_resp.status_code == 200
     session_data = session_resp.json()
     assert session_data["session_id"] == sid
