@@ -264,7 +264,7 @@ Retrieves tracked behavioral events for a specific session for evaluation and re
 The test suite runs entirely offline without requiring a live Ollama server:
 
 ```powershell
-# Run all 84 offline unit and integration tests across Phases 1-5
+# Run all 99 offline unit and integration tests across Phases 1-6
 .\.venv\Scripts\pytest.exe -v --ignore=tests/test_agent.py
 ```
 
@@ -275,10 +275,52 @@ To run the live Ollama agent test:
 
 ---
 
-## 10. Security Limitations & Disclaimers
+## 10. Phase 6 Experimental Evaluation & Ablation Study
 
-1. **Regex & Deterministic DLP Heuristics**: Deterministic pattern matching cannot guarantee detection of all obfuscated, encoded, or novel secret formats. It serves as a high-speed baseline.
-2. **Conservative Provenance Propagation**: Provenance tracking elevates sensitivity based on session history and resource IDs. Unstructured narratives deriving from confidential provenance without exact regex matches are gated by confirmation.
+Phase 6 implements a reproducible experimental framework evaluating effectiveness, limitations, and runtime overhead across four isolated configurations under identical deterministic inputs and mock model traces across 114 synthetic test scenarios:
+
+1. **Configuration A (Unprotected Agent)**: Bypasses security controls in an isolated test harness using simulated mock tools and synthetic data.
+2. **Configuration B (Rule-Based Baseline)**: Conventional static controls (keyword prompt injection detection, Pydantic schema validation, tool permission checks, and basic regex DLP scanning).
+3. **Configuration D (Behavioral-Engine Ablation)**: Retains input firewall, tool validation, provenance elevation, and output DLP, but disables the Phase 4 Behavioral Risk Engine.
+4. **Configuration C (Full RAPHAEL Gateway)**: Full integrated runtime stack (Input Firewall, Central Tool Firewall, Behavioral Risk Engine, Dual-Point Output Firewall, Data Provenance, and single-use confirmation tokens).
+
+### Running the Benchmark
+
+```powershell
+.\.venv\Scripts\python.exe -m evaluation.runner
+```
+
+### Benchmark Summary Results (4 Configurations)
+
+| Metric | Configuration A (Unprotected) | Configuration B (Baseline) | Configuration D (BRE Ablation) | Configuration C (Full RAPHAEL) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Detection Precision** | Undefined (0/0) | 0.9857 | 0.9872 | **0.9875** |
+| **Detection Recall** | 0.0000 | 0.8313 | 0.9277 | **0.9518** |
+| **Detection F1 Score** | 0.0000 | 0.9020 | 0.9565 | **0.9693** |
+| **False Positive Rate (FPR)** | 0.0000 | 0.0323 | 0.0323 | **0.0323** |
+| **Attack Prevention Rate** | 47.0% | 96.4% | 100.0% | **100.0%** |
+| **Unauthorized Tools Executed** | 35 | 0 | 0 | **0** |
+| **Unauthorized Disclosures** | 26 | 3 | 0 | **0** |
+| **Valid Benign Completion Rate** | 100.0% | 100.0% | 100.0% | **100.0%** |
+| **Malformed Handling Rate** | 71.4% | 85.7% | 85.7% | **85.7%** |
+| **Mean Gateway Latency** | 0.019 ms | 0.149 ms | 0.790 ms | **0.834 ms** |
+| **Added Latency vs Baseline** | N/A | Reference | +0.641 ms | **+0.685 ms** |
+
+Generated evaluation artifacts:
+- [`results/scenario_results.csv`](file:///d:/RAPHAEL/results/scenario_results.csv)
+- [`results/aggregate_metrics.json`](file:///d:/RAPHAEL/results/aggregate_metrics.json)
+- [`results/category_metrics.csv`](file:///d:/RAPHAEL/results/category_metrics.csv)
+- [`results/latency_summary.json`](file:///d:/RAPHAEL/results/latency_summary.json)
+- [`results/evaluation_report.md`](file:///d:/RAPHAEL/results/evaluation_report.md)
+- [`results/charts/detection_comparison.svg`](file:///d:/RAPHAEL/results/charts/detection_comparison.svg)
+- [`results/charts/prevention_rates.svg`](file:///d:/RAPHAEL/results/charts/prevention_rates.svg)
+- [`results/charts/latency_comparison.svg`](file:///d:/RAPHAEL/results/charts/latency_comparison.svg)
+
+---
+
+## 11. Security Limitations & Disclaimers
+
+1. **Synthetic Scenarios vs. Real-World Attacks**: Synthetic scenarios evaluate defined threat categories. They cannot guarantee detection of all obfuscated, novel zero-day prompt injections.
+2. **Conservative Provenance Propagation**: Provenance tracking elevates sensitivity based on session history. Paraphrased narratives deriving from confidential provenance without exact regex matches require confirmation before release.
 3. **In-Memory Session & Challenge Storage**: Recipient permissions, confirmation challenge tokens, and session histories are simulated in memory for prototype research. Production deployment requires distributed key-value stores and enterprise IAM / OAuth2 token verification.
-4. **Not a Certified Enterprise DLP**: RAPHAEL is a research-oriented security gateway designed to study defense-in-depth for AI agents.
-5. **Phase 6 Scope**: Comprehensive benchmarking, metrics evaluation (precision, recall, false-positive rate, latency overhead), and attack dataset testing remain the focus of Phase 6.
+4. **Research Prototype**: RAPHAEL is a research-oriented security gateway designed to study defense-in-depth and behavioral risk correlation for tool-enabled AI agents.

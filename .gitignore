@@ -2,9 +2,16 @@
 .env
 .env.*
 !.env.example
+*.pem
+*.key
 
 # Python generated files
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+
+# Logs and temporary files
+logs/
+*.log
+*.tmp

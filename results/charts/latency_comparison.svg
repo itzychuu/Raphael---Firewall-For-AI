@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 360" width="780" height="360">
+  <style>
+    .title { font-family: sans-serif; font-size: 16px; font-weight: bold; fill: #1e293b; }
+    .label { font-family: sans-serif; font-size: 12px; fill: #475569; }
+    .bar-label { font-family: sans-serif; font-size: 10px; font-weight: bold; fill: #0f172a; }
+  </style>
+  <rect width="100%" height="100%" fill="#ffffff" rx="8" />
+  <text x="30" y="35" class="title">Harness / Gateway Latency Comparison (ms)</text>
+  <text x="170" y="80" class="label" text-anchor="middle" font-weight="bold">Median Latency (ms)</text>
+  <line x1="90" y1="260" x2="290" y2="260" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="100" y="257.0" width="36" height="3.0" fill="#64748b" rx="3"/>
+  <text x="118" y="251.0" class="bar-label" text-anchor="middle">0.01</text>
+  <rect x="145" y="248.3" width="36" height="11.7" fill="#0284c7" rx="3"/>
+  <text x="163" y="242.3" class="bar-label" text-anchor="middle">0.14</text>
+  <rect x="190" y="180.5" width="36" height="79.5" fill="#d97706" rx="3"/>
+  <text x="208" y="174.5" class="bar-label" text-anchor="middle">0.94</text>
+  <rect x="235" y="202.9" width="36" height="57.1" fill="#6366f1" rx="3"/>
+  <text x="253" y="196.9" class="bar-label" text-anchor="middle">0.67</text>
+  <text x="470" y="80" class="label" text-anchor="middle" font-weight="bold">P95 Latency (ms)</text>
+  <line x1="390" y1="260" x2="590" y2="260" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="400" y="254.8" width="36" height="5.2" fill="#64748b" rx="3"/>
+  <text x="418" y="248.8" class="bar-label" text-anchor="middle">0.06</text>
+  <rect x="445" y="240.0" width="36" height="20.0" fill="#0284c7" rx="3"/>
+  <text x="463" y="234.0" class="bar-label" text-anchor="middle">0.23</text>
+  <rect x="490" y="100.0" width="36" height="160.0" fill="#d97706" rx="3"/>
+  <text x="508" y="94.0" class="bar-label" text-anchor="middle">1.88</text>
+  <rect x="535" y="137.1" width="36" height="122.9" fill="#6366f1" rx="3"/>
+  <text x="553" y="131.1" class="bar-label" text-anchor="middle">1.45</text>
+  <rect x="50" y="310" width="14" height="14" fill="#64748b" rx="2"/>
+  <text x="70" y="321" class="label">Unprotected</text>
+  <rect x="230" y="310" width="14" height="14" fill="#0284c7" rx="2"/>
+  <text x="250" y="321" class="label">Baseline</text>
+  <rect x="410" y="310" width="14" height="14" fill="#d97706" rx="2"/>
+  <text x="430" y="321" class="label">Ablated (No BRE)</text>
+  <rect x="590" y="310" width="14" height="14" fill="#6366f1" rx="2"/>
+  <text x="610" y="321" class="label">RAPHAEL</text>
+</svg>

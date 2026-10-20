@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 360" width="780" height="360">
+  <style>
+    .title { font-family: sans-serif; font-size: 16px; font-weight: bold; fill: #1e293b; }
+    .label { font-family: sans-serif; font-size: 12px; fill: #475569; }
+    .bar-label { font-family: sans-serif; font-size: 10px; font-weight: bold; fill: #0f172a; }
+  </style>
+  <rect width="100%" height="100%" fill="#ffffff" rx="8" />
+  <text x="30" y="35" class="title">Attack Prevention vs. Valid Benign Task Success Rate</text>
+  <text x="170" y="80" class="label" text-anchor="middle" font-weight="bold">Attack Prevention Rate</text>
+  <line x1="90" y1="260" x2="290" y2="260" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="100" y="184.8" width="36" height="75.2" fill="#ef4444" rx="3"/>
+  <text x="118" y="178.8" class="bar-label" text-anchor="middle">47.0%</text>
+  <rect x="145" y="105.8" width="36" height="154.2" fill="#38bdf8" rx="3"/>
+  <text x="163" y="99.8" class="bar-label" text-anchor="middle">96.4%</text>
+  <rect x="190" y="100.0" width="36" height="160.0" fill="#f59e0b" rx="3"/>
+  <text x="208" y="94.0" class="bar-label" text-anchor="middle">100.0%</text>
+  <rect x="235" y="100.0" width="36" height="160.0" fill="#10b981" rx="3"/>
+  <text x="253" y="94.0" class="bar-label" text-anchor="middle">100.0%</text>
+  <text x="470" y="80" class="label" text-anchor="middle" font-weight="bold">Valid Benign Task Success Rate</text>
+  <line x1="390" y1="260" x2="590" y2="260" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="400" y="100.0" width="36" height="160.0" fill="#ef4444" rx="3"/>
+  <text x="418" y="94.0" class="bar-label" text-anchor="middle">100.0%</text>
+  <rect x="445" y="100.0" width="36" height="160.0" fill="#38bdf8" rx="3"/>
+  <text x="463" y="94.0" class="bar-label" text-anchor="middle">100.0%</text>
+  <rect x="490" y="100.0" width="36" height="160.0" fill="#f59e0b" rx="3"/>
+  <text x="508" y="94.0" class="bar-label" text-anchor="middle">100.0%</text>
+  <rect x="535" y="100.0" width="36" height="160.0" fill="#10b981" rx="3"/>
+  <text x="553" y="94.0" class="bar-label" text-anchor="middle">100.0%</text>
+  <rect x="50" y="310" width="14" height="14" fill="#ef4444" rx="2"/>
+  <text x="70" y="321" class="label">Unprotected</text>
+  <rect x="230" y="310" width="14" height="14" fill="#38bdf8" rx="2"/>
+  <text x="250" y="321" class="label">Baseline</text>
+  <rect x="410" y="310" width="14" height="14" fill="#f59e0b" rx="2"/>
+  <text x="430" y="321" class="label">Ablated (No BRE)</text>
+  <rect x="590" y="310" width="14" height="14" fill="#10b981" rx="2"/>
+  <text x="610" y="321" class="label">RAPHAEL</text>
+</svg>

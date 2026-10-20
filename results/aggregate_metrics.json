@@ -1,0 +1,222 @@
+{
+  "unprotected": {
+    "configuration": "unprotected",
+    "detection": {
+      "confusion_matrix": {
+        "tp": 0,
+        "fp": 0,
+        "tn": 31,
+        "fn": 83
+      },
+      "total_samples": 114,
+      "attack_samples": 83,
+      "benign_samples": 31,
+      "precision": null,
+      "precision_display": "Undefined (0/0: no alerts generated)",
+      "recall": 0.0,
+      "f1_score": 0.0,
+      "false_positive_rate": 0.0,
+      "false_negative_rate": 1.0,
+      "accuracy": 0.2719
+    },
+    "prevention": {
+      "total_attacks": 83,
+      "attacks_prevented": 39,
+      "attack_prevention_rate": 0.4699,
+      "unauthorized_tools_executed": 35,
+      "unauthorized_tool_execution_rate": 0.4217,
+      "unauthorized_disclosures_occurred": 26,
+      "unauthorized_disclosure_rate": 0.3133,
+      "total_scenarios": 114,
+      "confirmation_challenges": 0,
+      "confirmation_challenge_rate": 0.0,
+      "total_benign_tasks": 31,
+      "successful_benign_tasks": 29,
+      "successful_benign_task_rate": 0.9355,
+      "valid_benign_tasks": 24,
+      "valid_benign_completed": 24,
+      "valid_benign_success_rate": 1.0,
+      "malformed_robustness_scenarios": 7,
+      "malformed_robustness_handled": 5,
+      "malformed_robustness_rate": 0.7143,
+      "actions_definitively_blocked": 0,
+      "actions_held_pending_confirmation": 0,
+      "actions_released_safe": 88
+    },
+    "latency": {
+      "sample_count": 342,
+      "mean_ms": 0.019,
+      "median_ms": 0.013,
+      "p95_ms": 0.061,
+      "min_ms": 0.002,
+      "max_ms": 0.16,
+      "added_latency_vs_baseline_ms": null,
+      "relative_overhead_pct": null
+    }
+  },
+  "baseline": {
+    "configuration": "baseline",
+    "detection": {
+      "confusion_matrix": {
+        "tp": 69,
+        "fp": 1,
+        "tn": 30,
+        "fn": 14
+      },
+      "total_samples": 114,
+      "attack_samples": 83,
+      "benign_samples": 31,
+      "precision": 0.9857,
+      "precision_display": "0.9857",
+      "recall": 0.8313,
+      "f1_score": 0.902,
+      "false_positive_rate": 0.0323,
+      "false_negative_rate": 0.1687,
+      "accuracy": 0.8684
+    },
+    "prevention": {
+      "total_attacks": 83,
+      "attacks_prevented": 80,
+      "attack_prevention_rate": 0.9639,
+      "unauthorized_tools_executed": 0,
+      "unauthorized_tool_execution_rate": 0.0,
+      "unauthorized_disclosures_occurred": 3,
+      "unauthorized_disclosure_rate": 0.0361,
+      "total_scenarios": 114,
+      "confirmation_challenges": 20,
+      "confirmation_challenge_rate": 0.1754,
+      "total_benign_tasks": 31,
+      "successful_benign_tasks": 30,
+      "successful_benign_task_rate": 0.9677,
+      "valid_benign_tasks": 24,
+      "valid_benign_completed": 24,
+      "valid_benign_success_rate": 1.0,
+      "malformed_robustness_scenarios": 7,
+      "malformed_robustness_handled": 6,
+      "malformed_robustness_rate": 0.8571,
+      "actions_definitively_blocked": 40,
+      "actions_held_pending_confirmation": 20,
+      "actions_released_safe": 51
+    },
+    "latency": {
+      "sample_count": 342,
+      "mean_ms": 0.195,
+      "median_ms": 0.138,
+      "p95_ms": 0.235,
+      "min_ms": 0.073,
+      "max_ms": 8.096,
+      "added_latency_vs_baseline_ms": null,
+      "relative_overhead_pct": null
+    }
+  },
+  "ablated": {
+    "configuration": "ablated",
+    "detection": {
+      "confusion_matrix": {
+        "tp": 77,
+        "fp": 1,
+        "tn": 30,
+        "fn": 6
+      },
+      "total_samples": 114,
+      "attack_samples": 83,
+      "benign_samples": 31,
+      "precision": 0.9872,
+      "precision_display": "0.9872",
+      "recall": 0.9277,
+      "f1_score": 0.9565,
+      "false_positive_rate": 0.0323,
+      "false_negative_rate": 0.0723,
+      "accuracy": 0.9386
+    },
+    "prevention": {
+      "total_attacks": 83,
+      "attacks_prevented": 83,
+      "attack_prevention_rate": 1.0,
+      "unauthorized_tools_executed": 0,
+      "unauthorized_tool_execution_rate": 0.0,
+      "unauthorized_disclosures_occurred": 0,
+      "unauthorized_disclosure_rate": 0.0,
+      "total_scenarios": 114,
+      "confirmation_challenges": 28,
+      "confirmation_challenge_rate": 0.2456,
+      "total_benign_tasks": 31,
+      "successful_benign_tasks": 30,
+      "successful_benign_task_rate": 0.9677,
+      "valid_benign_tasks": 24,
+      "valid_benign_completed": 24,
+      "valid_benign_success_rate": 1.0,
+      "malformed_robustness_scenarios": 7,
+      "malformed_robustness_handled": 6,
+      "malformed_robustness_rate": 0.8571,
+      "actions_definitively_blocked": 40,
+      "actions_held_pending_confirmation": 28,
+      "actions_released_safe": 46
+    },
+    "latency": {
+      "sample_count": 342,
+      "mean_ms": 1.013,
+      "median_ms": 0.935,
+      "p95_ms": 1.882,
+      "min_ms": 0.077,
+      "max_ms": 5.768,
+      "added_latency_vs_baseline_ms": 0.818,
+      "relative_overhead_pct": 419.68
+    }
+  },
+  "raphael": {
+    "configuration": "raphael",
+    "detection": {
+      "confusion_matrix": {
+        "tp": 79,
+        "fp": 1,
+        "tn": 30,
+        "fn": 4
+      },
+      "total_samples": 114,
+      "attack_samples": 83,
+      "benign_samples": 31,
+      "precision": 0.9875,
+      "precision_display": "0.9875",
+      "recall": 0.9518,
+      "f1_score": 0.9693,
+      "false_positive_rate": 0.0323,
+      "false_negative_rate": 0.0482,
+      "accuracy": 0.9561
+    },
+    "prevention": {
+      "total_attacks": 83,
+      "attacks_prevented": 83,
+      "attack_prevention_rate": 1.0,
+      "unauthorized_tools_executed": 0,
+      "unauthorized_tool_execution_rate": 0.0,
+      "unauthorized_disclosures_occurred": 0,
+      "unauthorized_disclosure_rate": 0.0,
+      "total_scenarios": 114,
+      "confirmation_challenges": 30,
+      "confirmation_challenge_rate": 0.2632,
+      "total_benign_tasks": 31,
+      "successful_benign_tasks": 30,
+      "successful_benign_task_rate": 0.9677,
+      "valid_benign_tasks": 24,
+      "valid_benign_completed": 24,
+      "valid_benign_success_rate": 1.0,
+      "malformed_robustness_scenarios": 7,
+      "malformed_robustness_handled": 6,
+      "malformed_robustness_rate": 0.8571,
+      "actions_definitively_blocked": 40,
+      "actions_held_pending_confirmation": 30,
+      "actions_released_safe": 44
+    },
+    "latency": {
+      "sample_count": 342,
+      "mean_ms": 0.761,
+      "median_ms": 0.672,
+      "p95_ms": 1.446,
+      "min_ms": 0.086,
+      "max_ms": 4.113,
+      "added_latency_vs_baseline_ms": 0.566,
+      "relative_overhead_pct": 290.5
+    }
+  }
+}
