@@ -1,8 +1,19 @@
+import datetime
 import re
+import uuid
 from typing import Any, Callable, Dict, Optional, Type
 from pydantic import BaseModel, ValidationError
 
 from app.firewall.audit import log_audit_event
+from app.firewall.behavior_models import (
+    BehavioralEvent,
+    BehavioralEventType,
+    DataSensitivity,
+    UserIntent,
+)
+from app.firewall.behavioral_engine import assess_behavior
+from app.firewall.sensitivity import classify_resource_sensitivity
+from app.firewall.session_history import session_history
 from app.models.schemas import (
     AuditEventType,
     CalculatorArgs,
@@ -131,7 +142,7 @@ def evaluate_tool_policy(
     arguments: Dict[str, Any],
     security_context: SecurityContext,
 ) -> tuple[Decision, int, Optional[str]]:
-    """Determine the policy decision and risk for a specific tool call and context."""
+    """Determine the Phase 3 static policy decision and risk for a specific tool call and context."""
     risk = reg.default_risk
     decision = reg.default_decision
     reason = None
@@ -159,18 +170,77 @@ def evaluate_tool_policy(
     return decision, risk, reason
 
 
+DECISION_SEVERITY = {
+    Decision.ALLOW: 0,
+    Decision.MONITOR: 1,
+    Decision.CONFIRM: 2,
+    Decision.BLOCK: 3,
+}
+
+
+def combine_decisions(
+    phase3_decision: Decision,
+    phase3_risk: int,
+    phase3_reason: Optional[str],
+    behavioral_decision: Decision,
+    behavioral_risk: int,
+    behavioral_reason: Optional[str],
+) -> tuple[Decision, int, str]:
+    """Combine Phase 3 authorization decisions with Phase 4 Behavioral Risk Assessment.
+
+    Enforces critical security invariants:
+    - Phase 3 BLOCK can NEVER be downgraded.
+    - Phase 3 CONFIRM can NEVER be downgraded to ALLOW or MONITOR.
+    - If behavioral risk recommends a more restrictive decision, escalate to the more restrictive one.
+    - Final risk is the maximum of static risk and behavioral risk.
+    """
+    final_risk = max(phase3_risk, behavioral_risk)
+
+    sev_p3 = DECISION_SEVERITY[phase3_decision]
+    sev_beh = DECISION_SEVERITY[behavioral_decision]
+
+    # Most restrictive decision wins
+    if sev_beh > sev_p3:
+        final_decision = behavioral_decision
+    else:
+        final_decision = phase3_decision
+
+    # Invariant check: Phase 3 BLOCK cannot be lowered
+    if phase3_decision == Decision.BLOCK:
+        final_decision = Decision.BLOCK
+
+    # Invariant check: Phase 3 CONFIRM cannot be lowered to ALLOW or MONITOR
+    if phase3_decision == Decision.CONFIRM and final_decision in (Decision.ALLOW, Decision.MONITOR):
+        final_decision = Decision.CONFIRM
+
+    # Construct combined explanation
+    reasons = [r for r in [phase3_reason, behavioral_reason] if r]
+    final_reason = "; ".join(reasons) if reasons else "Policy enforced"
+
+    return final_decision, final_risk, final_reason
+
+
 def execute_tool(
     tool_name: str,
     arguments: Dict[str, Any],
     security_context: Optional[SecurityContext] = None,
     correlation_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    user_intent: Optional[UserIntent] = None,
 ) -> ToolExecutionResult:
-    """Central Tool Firewall Boundary.
+    """Central Tool Firewall Boundary with Behavioral Risk Engine Integration.
 
-    Enforces tool existence, argument validation, least privilege authorization,
-    risk policy, confirmation gates, and safe execution.
+    1. Tool Registry Verification
+    2. Least Privilege Authorization Check
+    3. Strict Pydantic Argument Validation
+    4. Phase 3 Static Policy Evaluation
+    5. Phase 4 Behavioral Risk Assessment across Session History
+    6. Policy Combination respecting Security Invariants
+    7. Sandboxed Tool Execution and Session Event Recording
     """
     context = security_context or SecurityContext()
+    sid = session_id or correlation_id or str(uuid.uuid4())
+    now_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     # 1. Tool Registry Verification
     reg = tool_registry.get(tool_name)
@@ -184,6 +254,18 @@ def execute_tool(
             user_id=context.user_id,
             tool_name=tool_name,
             details={"reason": f"Tool '{tool_name}' is not registered"},
+        )
+        session_history.add_event(
+            BehavioralEvent(
+                event_id=str(uuid.uuid4()),
+                session_id=sid,
+                timestamp=now_ts,
+                event_type=BehavioralEventType.TOOL_DENIED,
+                tool_name=tool_name,
+                risk_score=90,
+                policy_decision=Decision.BLOCK.value,
+                execution_outcome="rejected_unknown_tool",
+            )
         )
         return ToolExecutionResult(
             tool=tool_name,
@@ -208,6 +290,19 @@ def execute_tool(
                 "required_permission": reg.required_permission,
                 "user_permissions": context.permissions,
             },
+        )
+        session_history.add_event(
+            BehavioralEvent(
+                event_id=str(uuid.uuid4()),
+                session_id=sid,
+                timestamp=now_ts,
+                event_type=BehavioralEventType.TOOL_DENIED,
+                tool_name=tool_name,
+                risk_score=80,
+                policy_decision=Decision.BLOCK.value,
+                required_permission=reg.required_permission,
+                execution_outcome="permission_denied",
+            )
         )
         return ToolExecutionResult(
             tool=tool_name,
@@ -235,6 +330,18 @@ def execute_tool(
             tool_name=tool_name,
             details={"validation_errors": error_msg},
         )
+        session_history.add_event(
+            BehavioralEvent(
+                event_id=str(uuid.uuid4()),
+                session_id=sid,
+                timestamp=now_ts,
+                event_type=BehavioralEventType.TOOL_DENIED,
+                tool_name=tool_name,
+                risk_score=60,
+                policy_decision=Decision.BLOCK.value,
+                execution_outcome="validation_failed",
+            )
+        )
         return ToolExecutionResult(
             tool=tool_name,
             status=ToolExecutionStatus.VALIDATION_ERROR,
@@ -253,68 +360,180 @@ def execute_tool(
             reason="Argument validation failure",
         )
 
-    # 4. Contextual Policy and Risk Evaluation
-    decision, risk, policy_reason = evaluate_tool_policy(reg, validated_args, context)
+    # 4. Contextual Phase 3 Policy & Risk Evaluation
+    phase3_decision, phase3_risk, phase3_reason = evaluate_tool_policy(reg, validated_args, context)
 
-    # 5. Policy Decision Enforcement
-    if decision == Decision.BLOCK:
+    # Determine Resource Sensitivity
+    resource_sensitivity = classify_resource_sensitivity(tool_name, validated_args)
+
+    # 5. Phase 4 Behavioral Risk Assessment
+    prior_events = session_history.get_session_events(sid)
+
+    # Deduce user intent from session history if not explicitly provided
+    effective_intent = user_intent
+    if not effective_intent:
+        for ev in prior_events:
+            if ev.event_type == BehavioralEventType.USER_REQUEST and ev.user_intent:
+                effective_intent = ev.user_intent
+                break
+    if not effective_intent:
+        effective_intent = UserIntent.UNKNOWN
+
+    # Record TOOL_REQUESTED in session history
+    session_history.add_event(
+        BehavioralEvent(
+            event_id=str(uuid.uuid4()),
+            session_id=sid,
+            timestamp=now_ts,
+            event_type=BehavioralEventType.TOOL_REQUESTED,
+            user_intent=effective_intent,
+            tool_name=tool_name,
+            tool_action=tool_name,
+            required_permission=reg.required_permission,
+            data_sensitivity=resource_sensitivity,
+        )
+    )
+
+    try:
+        behavioral_assessment = assess_behavior(
+            tool_name=tool_name,
+            arguments=validated_args,
+            user_intent=effective_intent,
+            session_events=prior_events,
+            security_context=context,
+        )
+        beh_decision = Decision(behavioral_assessment.decision)
+        beh_risk = behavioral_assessment.risk_score
+        beh_reason = behavioral_assessment.explanation
+        beh_dict = behavioral_assessment.model_dump()
+    except Exception as exc:
+        # Fail-safe policy: never fail open on behavioral assessment error
+        log_audit_event(
+            event_type=AuditEventType.SECURITY_ERROR,
+            policy_decision=Decision.CONFIRM if resource_sensitivity != DataSensitivity.PUBLIC else Decision.MONITOR,
+            outcome="behavioral_engine_exception",
+            risk_score=50,
+            correlation_id=correlation_id,
+            user_id=context.user_id,
+            tool_name=tool_name,
+            details={"error": str(exc)},
+        )
+        beh_decision = Decision.CONFIRM if resource_sensitivity in (DataSensitivity.CONFIDENTIAL, DataSensitivity.RESTRICTED) else Decision.MONITOR
+        beh_risk = 50
+        beh_reason = "Behavioral assessment encountered error; applying conservative fail-safe policy"
+        beh_dict = {"error": "Behavioral assessment failed"}
+
+    # 6. Combine Policy Decisions Respecting Invariants
+    final_decision, final_risk, final_reason = combine_decisions(
+        phase3_decision=phase3_decision,
+        phase3_risk=phase3_risk,
+        phase3_reason=phase3_reason,
+        behavioral_decision=beh_decision,
+        behavioral_risk=beh_risk,
+        behavioral_reason=beh_reason,
+    )
+
+    # 7. Policy Enforcement
+    if final_decision == Decision.BLOCK:
         log_audit_event(
             event_type=AuditEventType.TOOL_BLOCKED,
             policy_decision=Decision.BLOCK,
             outcome="blocked_by_policy",
-            risk_score=risk,
+            risk_score=final_risk,
             correlation_id=correlation_id,
             user_id=context.user_id,
             tool_name=tool_name,
-            details={"reason": policy_reason},
+            details={"reason": final_reason, "behavioral": beh_dict},
+        )
+        session_history.add_event(
+            BehavioralEvent(
+                event_id=str(uuid.uuid4()),
+                session_id=sid,
+                timestamp=now_ts,
+                event_type=BehavioralEventType.TOOL_DENIED,
+                tool_name=tool_name,
+                risk_score=final_risk,
+                policy_decision=Decision.BLOCK.value,
+                data_sensitivity=resource_sensitivity,
+                execution_outcome="blocked_by_policy",
+                security_indicators=beh_dict.get("indicators", []),
+            )
         )
         return ToolExecutionResult(
             tool=tool_name,
             status=ToolExecutionStatus.BLOCKED,
             decision=Decision.BLOCK,
-            risk=risk,
+            risk=final_risk,
             error="Tool execution blocked by security policy",
-            reason=policy_reason,
+            reason=final_reason,
+            behavioral_assessment=beh_dict,
         )
 
-    if decision == Decision.CONFIRM:
+    if final_decision == Decision.CONFIRM:
         log_audit_event(
             event_type=AuditEventType.TOOL_CONFIRM_REQUIRED,
             policy_decision=Decision.CONFIRM,
             outcome="confirmation_required",
-            risk_score=risk,
+            risk_score=final_risk,
             correlation_id=correlation_id,
             user_id=context.user_id,
             tool_name=tool_name,
-            details={"reason": policy_reason, "arguments": validated_args},
+            details={"reason": final_reason, "arguments": validated_args, "behavioral": beh_dict},
+        )
+        session_history.add_event(
+            BehavioralEvent(
+                event_id=str(uuid.uuid4()),
+                session_id=sid,
+                timestamp=now_ts,
+                event_type=BehavioralEventType.CONFIRMATION_REQUIRED,
+                tool_name=tool_name,
+                risk_score=final_risk,
+                policy_decision=Decision.CONFIRM.value,
+                data_sensitivity=resource_sensitivity,
+                execution_outcome="confirmation_required",
+                security_indicators=beh_dict.get("indicators", []),
+            )
         )
         return ToolExecutionResult(
             tool=tool_name,
             status=ToolExecutionStatus.CONFIRMATION_REQUIRED,
             decision=Decision.CONFIRM,
-            risk=risk,
+            risk=final_risk,
             result=None,
             error=None,
-            reason=policy_reason or "Action requires explicit user confirmation before execution",
+            reason=final_reason,
+            behavioral_assessment=beh_dict,
         )
 
-    if decision == Decision.MONITOR:
+    if final_decision == Decision.MONITOR:
         log_audit_event(
             event_type=AuditEventType.TOOL_AUTHORIZATION,
             policy_decision=Decision.MONITOR,
             outcome="monitored_execution_authorized",
-            risk_score=risk,
+            risk_score=final_risk,
             correlation_id=correlation_id,
             user_id=context.user_id,
             tool_name=tool_name,
-            details={"reason": policy_reason},
+            details={"reason": final_reason, "behavioral": beh_dict},
         )
 
-    # 6. Safe Execution
+    # Record TOOL_AUTHORIZED in session history
+    session_history.add_event(
+        BehavioralEvent(
+            event_id=str(uuid.uuid4()),
+            session_id=sid,
+            timestamp=now_ts,
+            event_type=BehavioralEventType.TOOL_AUTHORIZED,
+            tool_name=tool_name,
+            risk_score=final_risk,
+            policy_decision=final_decision.value,
+            data_sensitivity=resource_sensitivity,
+        )
+    )
+
+    # 8. Safe Execution
     try:
-        # Adapt arguments to underlying tool functions
         if tool_name == "send_email":
-            # Underlying send_email takes recipient, message
             tool_output = reg.func(
                 recipient=validated_args["recipient"],
                 message=validated_args["message"],
@@ -322,29 +541,45 @@ def execute_tool(
         else:
             tool_output = reg.func(**validated_args)
 
-        # Audit successful execution
         log_audit_event(
             event_type=AuditEventType.TOOL_EXECUTION,
-            policy_decision=decision,
+            policy_decision=final_decision,
             outcome="success",
-            risk_score=risk,
+            risk_score=final_risk,
             correlation_id=correlation_id,
             user_id=context.user_id,
             tool_name=tool_name,
-            details={"status": tool_output.get("status") if isinstance(tool_output, dict) else "completed"},
+            details={
+                "status": tool_output.get("status") if isinstance(tool_output, dict) else "completed",
+                "behavioral_risk": beh_risk,
+            },
+        )
+
+        session_history.add_event(
+            BehavioralEvent(
+                event_id=str(uuid.uuid4()),
+                session_id=sid,
+                timestamp=now_ts,
+                event_type=BehavioralEventType.TOOL_EXECUTED,
+                tool_name=tool_name,
+                risk_score=final_risk,
+                policy_decision=final_decision.value,
+                data_sensitivity=resource_sensitivity,
+                execution_outcome="success",
+            )
         )
 
         return ToolExecutionResult(
             tool=tool_name,
             status=ToolExecutionStatus.SUCCESS,
-            decision=decision,
-            risk=risk,
+            decision=final_decision,
+            risk=final_risk,
             result=tool_output,
-            reason=policy_reason,
+            reason=final_reason,
+            behavioral_assessment=beh_dict,
         )
 
     except Exception as exc:
-        # Prevent internal details / stack traces from leaking
         log_audit_event(
             event_type=AuditEventType.SECURITY_ERROR,
             policy_decision=Decision.BLOCK,
@@ -355,11 +590,24 @@ def execute_tool(
             tool_name=tool_name,
             details={"error_type": type(exc).__name__},
         )
+        session_history.add_event(
+            BehavioralEvent(
+                event_id=str(uuid.uuid4()),
+                session_id=sid,
+                timestamp=now_ts,
+                event_type=BehavioralEventType.TOOL_DENIED,
+                tool_name=tool_name,
+                risk_score=75,
+                policy_decision=Decision.BLOCK.value,
+                execution_outcome="tool_exception",
+            )
+        )
         return ToolExecutionResult(
             tool=tool_name,
             status=ToolExecutionStatus.EXECUTION_ERROR,
-            decision=decision,
-            risk=risk,
+            decision=final_decision,
+            risk=final_risk,
             error="Tool execution encountered an internal error",
             reason="Runtime exception in tool execution",
+            behavioral_assessment=beh_dict,
         )

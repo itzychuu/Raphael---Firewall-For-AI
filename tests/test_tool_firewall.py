@@ -13,11 +13,16 @@ from app.models.schemas import (
 )
 
 
+from app.firewall.session_history import session_history
+
+
 @pytest.fixture(autouse=True)
 def clean_audit_log():
     clear_audit_events()
+    session_history.clear_all()
     yield
     clear_audit_events()
+    session_history.clear_all()
 
 
 def test_registered_tool_valid_execution():

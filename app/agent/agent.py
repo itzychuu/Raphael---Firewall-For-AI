@@ -1,10 +1,15 @@
+import datetime
 import json
 import logging
 import re
 from typing import Any, Callable, Dict, List, Optional
+import uuid
 import requests
 
 from app.firewall.audit import log_audit_event
+from app.firewall.behavior_models import BehavioralEvent, BehavioralEventType
+from app.firewall.intent import classify_intent
+from app.firewall.session_history import session_history
 from app.firewall.tool_firewall import execute_tool, tool_registry
 from app.models.schemas import (
     AuditEventType,
@@ -144,6 +149,23 @@ def run_agent_loop(
     """Controlled agent execution loop integrating with the Central Tool Firewall."""
     context = security_context or SecurityContext()
     llm_func = llm_callable or call_llm_messages
+    sid = correlation_id or str(uuid.uuid4())
+    now_ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    # Classify intent for behavioral context
+    user_intent, confidence, _ = classify_intent(user_input)
+
+    # Record user request in session history
+    session_history.add_event(
+        BehavioralEvent(
+            event_id=str(uuid.uuid4()),
+            session_id=sid,
+            timestamp=now_ts,
+            event_type=BehavioralEventType.USER_REQUEST,
+            user_intent=user_intent,
+            metadata={"confidence": confidence},
+        )
+    )
 
     messages: List[Dict[str, str]] = [
         {"role": "system", "content": AGENT_SYSTEM_PROMPT},
@@ -160,7 +182,7 @@ def run_agent_loop(
         outcome="started",
         correlation_id=correlation_id,
         user_id=context.user_id,
-        details={"max_iterations": max_iterations, "max_tool_calls": max_tool_calls},
+        details={"max_iterations": max_iterations, "max_tool_calls": max_tool_calls, "user_intent": user_intent.value},
     )
 
     while iteration_count < max_iterations:
@@ -231,6 +253,8 @@ def run_agent_loop(
                 arguments=raw_arguments,
                 security_context=context,
                 correlation_id=correlation_id,
+                session_id=sid,
+                user_intent=user_intent,
             )
 
             record = {

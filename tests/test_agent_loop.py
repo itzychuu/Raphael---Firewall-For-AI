@@ -1,7 +1,18 @@
 import json
 import pytest
 from app.agent.agent import run_agent_loop
+from app.firewall.audit import clear_audit_events
+from app.firewall.session_history import session_history
 from app.models.schemas import Decision, SecurityContext
+
+
+@pytest.fixture(autouse=True)
+def clean_session_and_audit():
+    clear_audit_events()
+    session_history.clear_all()
+    yield
+    clear_audit_events()
+    session_history.clear_all()
 
 
 def test_agent_loop_valid_tool_call_and_final_answer():

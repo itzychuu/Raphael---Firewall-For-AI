@@ -145,6 +145,7 @@ class ToolExecutionResult(BaseModel):
     result: Optional[Any] = None
     error: Optional[str] = None
     reason: Optional[str] = None
+    behavioral_assessment: Optional[Dict[str, Any]] = None
 
 
 # Audit Event Model

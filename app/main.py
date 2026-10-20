@@ -1,3 +1,4 @@
+import datetime
 import logging
 import uuid
 from typing import Any, Dict
@@ -8,7 +9,9 @@ from fastapi.responses import JSONResponse
 
 from app.agent.agent import OLLAMA_URL, run_agent_loop
 from app.firewall.audit import get_audit_events, log_audit_event
+from app.firewall.behavior_models import BehavioralEvent, BehavioralEventType
 from app.firewall.gateway import inspect_input
+from app.firewall.session_history import session_history
 from app.models.schemas import (
     AuditEventType,
     ChatRequest,
@@ -125,6 +128,17 @@ def chat_endpoint(payload: ChatRequest):
     input_decision = Decision(inspection["decision"])
     risk_score = inspection["risk"]
 
+    session_history.add_event(
+        BehavioralEvent(
+            event_id=str(uuid.uuid4()),
+            session_id=corr_id,
+            timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            event_type=BehavioralEventType.INPUT_INSPECTED,
+            risk_score=risk_score,
+            policy_decision=input_decision.value,
+        )
+    )
+
     # Step 2: Enforce Input Policy Decisions
     if input_decision == Decision.BLOCK:
         return ChatResponse(
@@ -194,3 +208,14 @@ def chat_endpoint(payload: ChatRequest):
         audit_id=corr_id,
         reason=agent_result.get("error") or agent_result.get("reason"),
     )
+
+
+@app.get("/behavior/session/{session_id}")
+def get_session_behavior(session_id: str):
+    """Retrieve tracked behavioral events for a specific session (for evaluation and research)."""
+    events = session_history.get_session_events(session_id)
+    return {
+        "session_id": session_id,
+        "event_count": len(events),
+        "events": [event.model_dump() for event in events],
+    }
