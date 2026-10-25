@@ -13,6 +13,7 @@ from app.firewall.behavior_models import (
 )
 from app.firewall.behavioral_engine import assess_behavior
 from app.firewall.sensitivity import classify_resource_sensitivity
+from app.firewall.confirmation import canonical_action_id
 from app.firewall.session_history import session_history
 from app.models.schemas import (
     AuditEventType,
@@ -121,6 +122,9 @@ class ToolRegistry:
     def get(self, name: str) -> Optional[ToolRegistration]:
         return self._tools.get(name)
 
+    def __contains__(self, name: str) -> bool:
+        return name in self._tools
+
     def list_tools(self) -> Dict[str, Dict[str, Any]]:
         return {
             name: {
@@ -151,14 +155,23 @@ def evaluate_tool_policy(
     if reg.name == "file_read":
         filename = arguments.get("filename", "")
         if "confidential" in filename.lower():
-            risk = 65
-            decision = Decision.CONFIRM
-            reason = "Access to confidential file requires explicit confirmation"
+            action_id = canonical_action_id("file_read", arguments)
+            # Security invariant: Generic 'file_read' and filename-only confirmations are strictly rejected.
+            # Strict binding to exact validated parameters (canonical_action_id) is enforced.
+            if security_context.is_action_confirmed(action_id):
+                decision = Decision.MONITOR
+                risk = 35
+                reason = "Access to confidential file confirmed by user authorization"
+            else:
+                risk = 65
+                decision = Decision.CONFIRM
+                reason = "Access to confidential file requires explicit confirmation"
 
     elif reg.name == "send_email":
-        action_key = "send_email"
-        recipient = arguments.get("recipient", "")
-        if security_context.is_action_confirmed(action_key) or security_context.is_action_confirmed(f"send_email:{recipient}"):
+        action_id = canonical_action_id("send_email", arguments)
+        # Security invariant: Generic 'send_email' and recipient-only authorizations are strictly rejected.
+        # Strict binding to exact validated parameters (canonical_action_id) is enforced.
+        if security_context.is_action_confirmed(action_id):
             decision = Decision.MONITOR
             risk = 35
             reason = "Outbound email confirmed by user authorization"
@@ -470,6 +483,10 @@ def execute_tool(
         )
 
     if final_decision == Decision.CONFIRM:
+        safe_audit_args = dict(validated_args)
+        if tool_name == "send_email" and "message" in safe_audit_args:
+            safe_audit_args["message"] = f"[{len(str(safe_audit_args['message']))} chars redacted]"
+
         log_audit_event(
             event_type=AuditEventType.TOOL_CONFIRM_REQUIRED,
             policy_decision=Decision.CONFIRM,
@@ -478,7 +495,7 @@ def execute_tool(
             correlation_id=correlation_id,
             user_id=context.user_id,
             tool_name=tool_name,
-            details={"reason": final_reason, "arguments": validated_args, "behavioral": beh_dict},
+            details={"reason": final_reason, "arguments": safe_audit_args, "behavioral": beh_dict},
         )
         session_history.add_event(
             BehavioralEvent(
@@ -533,13 +550,7 @@ def execute_tool(
 
     # 8. Safe Execution
     try:
-        if tool_name == "send_email":
-            tool_output = reg.func(
-                recipient=validated_args["recipient"],
-                message=validated_args["message"],
-            )
-        else:
-            tool_output = reg.func(**validated_args)
+        tool_output = reg.func(**validated_args)
 
         log_audit_event(
             event_type=AuditEventType.TOOL_EXECUTION,

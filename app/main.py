@@ -12,12 +12,13 @@ from fastapi.responses import JSONResponse
 from app.agent.agent import OLLAMA_URL, run_agent_loop
 from app.firewall.audit import get_audit_events, log_audit_event
 from app.firewall.behavior_models import BehavioralEvent, BehavioralEventType
-from app.firewall.confirmation import get_challenge_info, validate_and_consume_challenge
+from app.firewall.confirmation import canonical_action_id, get_challenge_info, validate_and_consume_challenge
 from app.firewall.dlp_detector import scan_data_for_dlp
 from app.firewall.gateway import inspect_input
 from app.firewall.output_firewall import inspect_output
 from app.firewall.redaction import redact_structured_data
 from app.firewall.session_history import session_history
+from app.firewall.tool_firewall import tool_registry
 from app.models.schemas import (
     AuditEventType,
     ChatRequest,
@@ -173,6 +174,9 @@ def chat_endpoint(payload: ChatRequest):
     # Step 3: Prepare Security Context with Server-Verified Confirmations
     verified_confirmations = []
     verified_disclosures = []
+    approved_action = None
+    approved_parameters = None
+
     if payload.confirmation_token:
         challenge = get_challenge_info(payload.confirmation_token)
         if challenge and validate_and_consume_challenge(
@@ -181,22 +185,52 @@ def chat_endpoint(payload: ChatRequest):
             session_id=corr_id,
             parameters=challenge.parameters,
         ):
+            approved_action = challenge.action
+            approved_parameters = dict(challenge.parameters)
             if challenge.action == "disclose_confidential":
                 res = challenge.parameters.get("resource")
                 if res:
                     verified_disclosures.append(res)
-            else:
+            elif challenge.action == "send_email":
+                recipient = challenge.parameters.get("recipient")
+                message = challenge.parameters.get("message")
+                if recipient and message:
+                    reg = tool_registry.get("send_email")
+                    try:
+                        approved_parameters = reg.schema.model_validate(challenge.parameters).model_dump()
+                    except Exception:
+                        pass
+                    action_id = canonical_action_id("send_email", approved_parameters)
+                    verified_confirmations.append(action_id)
+                else:
+                    log_audit_event(
+                        event_type=AuditEventType.SECURITY_ERROR,
+                        policy_decision=Decision.BLOCK,
+                        outcome="email_confirmation_missing_parameters",
+                        risk_score=75,
+                        correlation_id=corr_id,
+                    )
+            elif challenge.action.startswith("tool_result:"):
                 verified_confirmations.append(challenge.action)
-                if challenge.action == "send_email" and "recipient" in challenge.parameters:
-                    verified_confirmations.append(f"send_email:{challenge.parameters['recipient']}")
+            else:
+                reg = tool_registry.get(challenge.action)
+                if reg:
+                    try:
+                        approved_parameters = reg.schema.model_validate(challenge.parameters).model_dump()
+                    except Exception:
+                        pass
+                action_id = canonical_action_id(challenge.action, approved_parameters)
+                verified_confirmations.append(action_id)
+
         else:
+            masked_token = (payload.confirmation_token[:8] + "...") if payload.confirmation_token else "none"
             log_audit_event(
                 event_type=AuditEventType.SECURITY_ERROR,
                 policy_decision=Decision.BLOCK,
                 outcome="invalid_or_replayed_confirmation_token",
                 risk_score=75,
                 correlation_id=corr_id,
-                details={"provided_token": payload.confirmation_token[:8] + "..."},
+                details={"provided_token": masked_token},
             )
 
     # Note: Client-supplied confirmed_actions are strictly rejected for confirmation bypass
@@ -207,7 +241,7 @@ def chat_endpoint(payload: ChatRequest):
             outcome="untrusted_client_confirmed_actions_ignored",
             risk_score=70,
             correlation_id=corr_id,
-            details={"ignored_actions": payload.confirmed_actions},
+            details={"ignored_actions": [str(a)[:50] for a in payload.confirmed_actions]},
         )
 
     security_context = SecurityContext(
@@ -221,6 +255,8 @@ def chat_endpoint(payload: ChatRequest):
             user_input=payload.message,
             security_context=security_context,
             correlation_id=corr_id,
+            approved_action=approved_action,
+            approved_parameters=approved_parameters,
         )
     except Exception as exc:
         logger.error(f"Error during agent execution: {exc}")

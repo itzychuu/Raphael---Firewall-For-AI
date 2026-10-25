@@ -40,7 +40,7 @@ You have access to the following tools:
 - web_search(query: str): Search knowledge base for relevant facts. Example: {"query": "python"}
 - database_read(employee_id: str): Lookup employee details by ID. Example: {"employee_id": "employee_001"}
 - file_read(filename: str): Read pre-approved mock text files. Example: {"filename": "public_report.txt"}
-- send_email(recipient: str, message: str): Send simulated outbound email. Example: {"recipient": "user@example.com", "message": "hello"}
+- send_email(recipient: str, message: str, subject: Optional[str] = "Notification"): Send simulated outbound email. Example: {"recipient": "user@example.com", "subject": "RAPHAEL Test", "message": "hello"}
 
 CRITICAL RULES:
 1. To invoke a tool, your entire response MUST be a JSON object with this exact structure:
@@ -96,48 +96,145 @@ def ask_llm(user_input: str) -> str:
 def parse_model_action(response_text: str) -> Dict[str, Any]:
     """Parse model response for structured tool calls or final answer.
     Treats model output as untrusted text and validates JSON structure.
+    Only recognizes tools registered in tool_registry.
+    Prevents malformed, unknown, or ambiguous tool actions from silently
+    falling back to final_answer.
     """
     if not response_text or not response_text.strip():
         return {"action": "final_answer", "response": ""}
 
     text = response_text.strip()
 
-    # 1. Try markdown code block extraction
-    code_block_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    candidate_json = code_block_match.group(1) if code_block_match else None
+    # Strip thinking/reasoning tags (e.g. <think>...</think> from Qwen/DeepSeek)
+    cleaned_text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
+    target_text = cleaned_text if cleaned_text else text
 
-    # 2. Try raw JSON extraction
-    if not candidate_json:
-        brace_match = re.search(r"(\{.*\})", text, re.DOTALL)
-        if brace_match:
-            candidate_json = brace_match.group(1)
+    # Extract JSON candidates:
+    # 1. Look for markdown code blocks (```json ... ``` or ``` ... ```)
+    # 2. Raw JSON string if it looks like an object
+    # 3. Outermost curly braces {...}
+    candidate_json = None
+    in_code_block = False
+
+    code_block_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", target_text)
+    if code_block_match:
+        candidate_json = code_block_match.group(1).strip()
+        in_code_block = True
+    elif target_text.startswith("{") and target_text.endswith("}"):
+        candidate_json = target_text
+    else:
+        first_brace = target_text.find("{")
+        last_brace = target_text.rfind("}")
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            candidate_json = target_text[first_brace : last_brace + 1].strip()
+
+    registered_tools = set(tool_registry.list_tools().keys())
+
+    # Check if text appears to be an attempted tool action
+    tool_action_pattern = re.search(
+        r'("action"\s*:\s*"(?:tool_call|[^"]+)"|"tool"\s*:\s*"[^"]+"|"arguments"\s*:)',
+        target_text,
+    )
 
     if candidate_json:
         try:
             parsed = json.loads(candidate_json)
-            if isinstance(parsed, dict):
-                # Normal tool call format
-                if parsed.get("action") == "tool_call" and "tool" in parsed:
+        except Exception as json_err:
+            # If JSON parsing failed on a candidate that has tool action markers, fail closed
+            if tool_action_pattern:
+                return {
+                    "action": "parse_error",
+                    "error": f"Malformed JSON in tool action: {json_err}",
+                }
+            # Otherwise fall through to plain text final answer
+            return {"action": "final_answer", "response": text}
+
+        if isinstance(parsed, dict):
+            # Check for ambiguous objects containing both final_answer and tool action fields
+            is_final_answer_action = parsed.get("action") == "final_answer"
+            has_tool_field = "tool" in parsed
+            has_arguments_field = "arguments" in parsed
+
+            if is_final_answer_action:
+                if has_tool_field or (has_arguments_field and isinstance(parsed.get("arguments"), dict)):
                     return {
-                        "action": "tool_call",
-                        "tool": str(parsed.get("tool")),
-                        "arguments": parsed.get("arguments", {}),
+                        "action": "parse_error",
+                        "error": "Ambiguous action object: conflicting final_answer and tool action fields",
                     }
-                # Direct format {"tool": "...", "arguments": {...}}
-                if "tool" in parsed and "arguments" in parsed:
+                # Legitimate final answer
+                return {
+                    "action": "final_answer",
+                    "response": str(parsed.get("response", "")),
+                }
+
+            # Determine candidate tool name
+            candidate_tool = None
+            raw_action = parsed.get("action")
+            raw_tool = parsed.get("tool")
+
+            if raw_action == "tool_call":
+                # Standard format: {"action": "tool_call", "tool": "send_email", ...}
+                candidate_tool = raw_tool or parsed.get("name") or parsed.get("function")
+                if not candidate_tool or not isinstance(candidate_tool, str):
                     return {
-                        "action": "tool_call",
-                        "tool": str(parsed.get("tool")),
-                        "arguments": parsed.get("arguments", {}),
+                        "action": "parse_error",
+                        "error": "Malformed tool call: missing or invalid tool name",
                     }
-                if parsed.get("action") == "final_answer" and "response" in parsed:
+            elif raw_tool is not None:
+                # Direct format: {"tool": "send_email", ...}
+                if isinstance(raw_tool, str):
+                    candidate_tool = raw_tool
+                else:
                     return {
-                        "action": "final_answer",
-                        "response": str(parsed.get("response")),
+                        "action": "parse_error",
+                        "error": "Malformed tool call: 'tool' field must be a string",
                     }
-        except Exception:
-            # Fall through to raw text
-            pass
+            elif raw_action is not None and isinstance(raw_action, str):
+                if raw_action in registered_tools:
+                    # Qwen format: {"action": "send_email", ...}
+                    candidate_tool = raw_action
+                elif has_arguments_field:
+                    # e.g. {"action": "unknown_tool", "arguments": {...}}
+                    candidate_tool = raw_action
+
+            if candidate_tool is not None:
+                tool_name = str(candidate_tool).strip()
+
+                # Extract arguments
+                if "arguments" in parsed:
+                    args_val = parsed["arguments"]
+                    if not isinstance(args_val, dict):
+                        return {
+                            "action": "parse_error",
+                            "error": f"Invalid argument type for tool '{tool_name}': arguments must be a dictionary",
+                        }
+                    extracted_args = dict(args_val)
+                    # Merge any additional non-metadata top-level fields if not already present
+                    for k, v in parsed.items():
+                        if k not in ("action", "tool", "name", "function", "arguments") and k not in extracted_args:
+                            extracted_args[k] = v
+                else:
+                    # Top-level arguments format: require registered tool or explicit tool/tool_call marker
+                    if tool_name not in registered_tools and not ("tool" in parsed or raw_action == "tool_call"):
+                        # Plain JSON with non-tool action and no arguments; treat as plain response
+                        return {"action": "final_answer", "response": text}
+                    extracted_args = {
+                        k: v for k, v in parsed.items()
+                        if k not in ("action", "tool", "name", "function")
+                    }
+
+                return {
+                    "action": "tool_call",
+                    "tool": tool_name,
+                    "arguments": extracted_args,
+                }
+
+    # If raw text contains tool action markers (e.g. malformed or unparsed tool action attempt), fail closed
+    if tool_action_pattern:
+        return {
+            "action": "parse_error",
+            "error": "Malformed or incomplete tool action in model response",
+        }
 
     # Default fallback: plain text response from model
     return {"action": "final_answer", "response": text}
@@ -150,6 +247,8 @@ def run_agent_loop(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
     correlation_id: Optional[str] = None,
+    approved_action: Optional[str] = None,
+    approved_parameters: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Controlled agent execution loop integrating with the Central Tool Firewall."""
     context = security_context or SecurityContext()
@@ -210,8 +309,111 @@ def run_agent_loop(
 
         parsed_action = parse_model_action(response_text)
 
+        # Fail-closed if model response produced a tool parsing error
+        if parsed_action.get("action") == "parse_error":
+            error_msg = str(parsed_action.get("error", "Malformed model action"))
+            log_audit_event(
+                event_type=AuditEventType.SECURITY_ERROR,
+                policy_decision=Decision.BLOCK,
+                outcome="model_action_parse_error",
+                risk_score=70,
+                correlation_id=correlation_id,
+                user_id=context.user_id,
+                details={"error": error_msg, "raw_response": response_text[:500]},
+            )
+            return {
+                "status": "error",
+                "user_input": user_input,
+                "response": f"Action parsing failed: {error_msg}.",
+                "tool_calls": tool_call_history,
+                "decision": Decision.BLOCK.value,
+                "risk": 70,
+                "error": error_msg,
+            }
+
         # Final answer reached: inspect output before client release
         if parsed_action.get("action") == "final_answer":
+            raw_answer = parsed_action.get("response", "")
+
+            # Security guard: Ensure raw_answer does not embed an unexecuted serialized tool action
+            trimmed = raw_answer.strip()
+            if trimmed.startswith("{") or "```" in trimmed:
+                sub_parsed = parse_model_action(trimmed)
+                if sub_parsed.get("action") == "tool_call":
+                    # Re-route embedded action directly through the central tool firewall
+                    parsed_action = sub_parsed
+                elif sub_parsed.get("action") == "parse_error":
+                    log_audit_event(
+                        event_type=AuditEventType.SECURITY_ERROR,
+                        policy_decision=Decision.BLOCK,
+                        outcome="model_action_parse_error",
+                        risk_score=70,
+                        correlation_id=correlation_id,
+                        user_id=context.user_id,
+                        details={"error": sub_parsed.get("error"), "raw_response": raw_answer[:500]},
+                    )
+                    return {
+                        "status": "error",
+                        "user_input": user_input,
+                        "response": f"Action parsing failed: {sub_parsed.get('error')}.",
+                        "tool_calls": tool_call_history,
+                        "decision": Decision.BLOCK.value,
+                        "risk": 70,
+                        "error": sub_parsed.get("error"),
+                    }
+
+        if parsed_action.get("action") == "final_answer":
+            # If a confirmed action was authorized but not yet dispatched, execute it now
+            if approved_action and approved_action in tool_registry and tool_call_count == 0:
+                execution_result: ToolExecutionResult = execute_tool(
+                    tool_name=approved_action,
+                    arguments=approved_parameters or {},
+                    security_context=context,
+                    correlation_id=correlation_id,
+                    session_id=sid,
+                    user_intent=user_intent,
+                )
+                record = {
+                    "tool": approved_action,
+                    "arguments": approved_parameters or {},
+                    "status": execution_result.status.value,
+                    "decision": execution_result.decision.value,
+                    "risk": execution_result.risk,
+                }
+                tool_call_history.append(record)
+                tool_call_count += 1
+
+                if execution_result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED:
+                    challenge_token = create_confirmation_challenge(
+                        action=approved_action,
+                        session_id=sid,
+                        parameters=approved_parameters or {},
+                    )
+                    return {
+                        "status": "confirmation_required",
+                        "user_input": user_input,
+                        "response": f"Action '{approved_action}' requires explicit confirmation: {execution_result.reason}",
+                        "tool_calls": tool_call_history,
+                        "decision": Decision.CONFIRM.value,
+                        "risk": execution_result.risk,
+                        "required_action": approved_action,
+                        "confirmation_token": challenge_token,
+                    }
+
+                if execution_result.status in (ToolExecutionStatus.BLOCKED, ToolExecutionStatus.UNAUTHORIZED):
+                    return {
+                        "status": "blocked",
+                        "user_input": user_input,
+                        "response": f"Tool execution for '{approved_action}' was blocked by security policy.",
+                        "tool_calls": tool_call_history,
+                        "decision": Decision.BLOCK.value,
+                        "risk": execution_result.risk,
+                        "error": execution_result.error,
+                    }
+
+                tool_prov = create_tool_provenance(approved_action, approved_parameters or {}, session_id=sid)
+                session_provenances.append(tool_prov)
+
             raw_answer = parsed_action.get("response", "")
             combined_prov = elevate_provenance(session_provenances, default_session=sid)
             final_inspection = inspect_output(
@@ -316,10 +518,15 @@ def run_agent_loop(
 
             # If confirmation required: HALT loop immediately! Do not execute.
             if execution_result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED:
+                reg = tool_registry.get(tool_name)
+                try:
+                    challenge_params = reg.schema.model_validate(raw_arguments).model_dump() if reg else raw_arguments
+                except Exception:
+                    challenge_params = raw_arguments
                 challenge_token = create_confirmation_challenge(
                     action=tool_name,
                     session_id=sid,
-                    parameters=raw_arguments,
+                    parameters=challenge_params,
                 )
                 return {
                     "status": "confirmation_required",

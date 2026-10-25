@@ -9,7 +9,9 @@ from app.firewall.data_provenance import create_tool_provenance, elevate_provena
 from app.firewall.dlp_detector import scan_text_for_dlp
 from app.firewall.output_firewall import inspect_output
 from app.firewall.redaction import merge_overlapping_findings, redact_text
+import concurrent.futures
 from app.firewall.confirmation import (
+    canonical_action_id,
     clear_confirmation_challenges,
     create_confirmation_challenge,
     validate_and_consume_challenge,
@@ -484,6 +486,127 @@ def test_confirmation_challenge_parameter_mismatch_rejected():
     ) is False
 
 
+def test_confirmation_challenge_expired_token_fails():
+    """B.3: Verify that an expired confirmation token fails validation and cannot be consumed."""
+    token = create_confirmation_challenge(
+        action="send_email",
+        session_id="sess_expired",
+        parameters={"recipient": "user@example.com"},
+        ttl_seconds=-10,  # Immediately expired
+    )
+    assert validate_and_consume_challenge(
+        token=token,
+        action="send_email",
+        session_id="sess_expired",
+        parameters={"recipient": "user@example.com"},
+    ) is False
+
+
+def test_confirmation_challenge_wrong_session_fails():
+    """B.4: Verify that a token used with a mismatched session fails."""
+    token = create_confirmation_challenge(
+        action="send_email",
+        session_id="session_legitimate",
+        parameters={"recipient": "user@example.com"},
+    )
+    assert validate_and_consume_challenge(
+        token=token,
+        action="send_email",
+        session_id="session_hijacked",
+        parameters={"recipient": "user@example.com"},
+    ) is False
+
+
+def test_confirmation_challenge_wrong_action_fails():
+    """B.5: Verify that a token issued for one action fails when redeemed for a different action."""
+    token = create_confirmation_challenge(
+        action="send_email",
+        session_id="sess_action_test",
+        parameters={"recipient": "user@example.com"},
+    )
+    assert validate_and_consume_challenge(
+        token=token,
+        action="file_read",
+        session_id="sess_action_test",
+        parameters={"filename": "confidential.txt"},
+    ) is False
+
+
+def test_token_scope_separation_recipient_and_message():
+    """B.7: Verify that canonical action IDs for different recipients or messages differ."""
+    base_args = {"recipient": "alice@example.com", "message": "Secret message 1"}
+    diff_recipient = {"recipient": "bob@example.com", "message": "Secret message 1"}
+    diff_message = {"recipient": "alice@example.com", "message": "Secret message 2"}
+
+    id_base = canonical_action_id("send_email", base_args)
+    id_diff_recipient = canonical_action_id("send_email", diff_recipient)
+    id_diff_message = canonical_action_id("send_email", diff_message)
+
+    assert id_base != id_diff_recipient
+    assert id_base != id_diff_message
+    assert id_diff_recipient != id_diff_message
+    assert id_base.startswith("send_email:alice@example.com:")
+    assert id_diff_recipient.startswith("send_email:bob@example.com:")
+
+
+def test_cross_challenge_type_isolation():
+    """B.8: Verify that a disclosure challenge cannot authorize a tool action, and vice versa."""
+    tok_disclose = create_confirmation_challenge(
+        action="disclose_confidential",
+        session_id="sess_cross",
+        parameters={"resource": "confidential.txt"},
+    )
+    # Attempting to validate a disclosure token as send_email tool must fail
+    assert validate_and_consume_challenge(
+        token=tok_disclose,
+        action="send_email",
+        session_id="sess_cross",
+        parameters={"recipient": "admin@example.com"},
+    ) is False
+
+    tok_tool = create_confirmation_challenge(
+        action="send_email",
+        session_id="sess_cross_2",
+        parameters={"recipient": "admin@example.com", "message": "Notice"},
+    )
+    # Attempting to validate a tool token as disclose_confidential must fail
+    assert validate_and_consume_challenge(
+        token=tok_tool,
+        action="disclose_confidential",
+        session_id="sess_cross_2",
+        parameters={"resource": "confidential.txt"},
+    ) is False
+
+
+def test_concurrent_token_redemption_atomic_single_use():
+    """B.9: Verify that concurrent redemption attempts on the same token allow only exactly one winner."""
+    token = create_confirmation_challenge(
+        action="send_email",
+        session_id="sess_concurrent",
+        parameters={"recipient": "user@example.com"},
+    )
+
+    results = []
+    num_threads = 10
+
+    def attempt_redemption():
+        return validate_and_consume_challenge(
+            token=token,
+            action="send_email",
+            session_id="sess_concurrent",
+            parameters={"recipient": "user@example.com"},
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [executor.submit(attempt_redemption) for _ in range(num_threads)]
+        for f in concurrent.futures.as_completed(futures):
+            results.append(f.result())
+
+    # Invariant: Exactly one thread succeeds, all other 9 threads fail
+    assert results.count(True) == 1
+    assert results.count(False) == num_threads - 1
+
+
 def test_unauthorized_agent_confidential_lookup_halts_for_confirmation():
     """Verify that an unauthorized caller looking up confidential records halts with confirmation_required."""
     def mock_llm(messages):
@@ -672,7 +795,15 @@ def test_confirmation_token_full_lifecycle_and_scope_separation():
     def mock_agent_loop_approved(**kwargs):
         ctx = kwargs.get("security_context")
         captured_context.append(ctx)
-        assert ctx.is_action_confirmed("send_email") is True
+        # Verify generic email confirmation is absent (security invariant)
+        assert ctx.is_action_confirmed("send_email") is False
+        # Verify exact recipient and parameter confirmation is present
+        expected_action = canonical_action_id(
+            "send_email",
+            {"recipient": "security@company.com", "message": "Notice"},
+        )
+        assert ctx.is_action_confirmed(expected_action) is True
+        assert any(a.startswith("send_email:security@company.com:") for a in ctx.confirmed_actions)
         # Verify it did NOT grant disclosure confirmation or unrelated permissions
         assert ctx.is_disclosure_confirmed("confidential.txt") is False
         assert ctx.has_permission("disclose:confidential") is False

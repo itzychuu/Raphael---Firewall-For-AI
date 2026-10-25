@@ -84,7 +84,7 @@ Configuration D controls for static security (input filtering, schema checks, DL
 | **Multi-Step Exfiltration Stopped** | 8/8 (100.0%) | 8/8 (100.0%) | 0.0% (Both halt via Point B or BRE) |
 | **Out-of-Intent Resource Confirmation** | 2/7 (28.6%) | 7/7 (100.0%) | **+71.4% (BRE correlates intent with resource)** |
 | **Untrusted Chaining Gating** | 4/7 (57.1%) | 7/7 (100.0%) | **+42.9% (BRE detects untrusted sequence)** |
-| **Mean Gateway Latency** | 1.013 ms | 0.761 ms | **-0.252 ms** |
+| **Mean Gateway Latency** | 1.027 ms | 0.745 ms | **-0.282 ms** |
 
 ### Key Scientific Takeaways from the Ablation Study
 1. **Out-of-Intent Tool Escalation**: In Configuration D, when an agent accesses sensitive databases under a greeting or calculation prompt, static tool permissions permit the read (`Decision.MONITOR`). In Configuration C, the Behavioral Engine correlates user intent with resource sensitivity (`ACTION_OUTSIDE_REQUEST_SCOPE`), escalating the request to `CONFIRM`.
@@ -98,13 +98,13 @@ Configuration D controls for static security (input filtering, schema checks, DL
 | Latency Metric | Configuration A (Unprotected) | Configuration B (Baseline) | Configuration D (BRE Ablated) | Configuration C (Full RAPHAEL) |
 | :--- | :---: | :---: | :---: | :---: |
 | **Sample Count ($N$)** | 342 | 342 | 342 | 342 |
-| **Mean Gateway Latency** | 0.019 ms | 0.195 ms | 1.013 ms | 0.761 ms |
-| **Median Gateway Latency** | 0.013 ms | 0.138 ms | 0.935 ms | 0.672 ms |
-| **P95 Gateway Latency** | 0.061 ms | 0.235 ms | 1.882 ms | 1.446 ms |
-| **Added Latency vs Baseline** | N/A | Reference (0.0 ms) | +0.818 ms | +0.566 ms |
-| **Relative Overhead vs Baseline** | N/A | Reference (0.0%) | +419.7% | +290.5% |
+| **Mean Gateway Latency** | 0.019 ms | 0.154 ms | 1.027 ms | 0.745 ms |
+| **Median Gateway Latency** | 0.012 ms | 0.139 ms | 0.929 ms | 0.661 ms |
+| **P95 Gateway Latency** | 0.066 ms | 0.243 ms | 1.921 ms | 1.464 ms |
+| **Added Latency vs Baseline** | N/A | Reference (0.0 ms) | +0.873 ms | +0.590 ms |
+| **Relative Overhead vs Baseline** | N/A | Reference (0.0%) | +566.4% | +383.1% |
 
-> **Latency Interpretation & LLM Scale**: The gateway mean latency of 0.761 ms represents approximately **0.152%** of a 500 ms LLM inference and **0.038%** of a 2,000 ms LLM inference. These end-to-end percentages are analytical estimates against hypothetical local/remote inference baselines, not directly measured model execution times.
+> **Latency Interpretation & LLM Scale**: The gateway mean latency of 0.745 ms represents approximately **0.149%** of a 500 ms LLM inference and **0.037%** of a 2,000 ms LLM inference. These end-to-end percentages are analytical estimates against hypothetical local/remote inference baselines, not directly measured model execution times.
 
 ---
 

@@ -4,6 +4,7 @@ from app.firewall.tool_firewall import (
     tool_registry,
     ToolRegistration,
 )
+from app.firewall.confirmation import canonical_action_id
 from app.firewall.audit import get_audit_events, clear_audit_events
 from app.models.schemas import (
     Decision,
@@ -98,23 +99,135 @@ def test_unauthorized_operation_rejected():
     assert "Permission denied" in result.error
 
 
-def test_confirm_policy_does_not_execute_tool():
-    # Email requires confirmation by default
-    result = execute_tool("send_email", {"recipient": "test@example.com", "message": "Notice"})
+
+# ============================================================================
+# Section A: Unit-Level Tool-Firewall Tests (Confirmation Authorization)
+# ============================================================================
+
+def test_email_without_confirmation_requires_confirm_and_does_not_execute():
+    """A.1: Email without confirmation returns CONFIRMATION_REQUIRED and does not execute."""
+    args = {"recipient": "alice@example.com", "message": "Important notice"}
+    result = execute_tool("send_email", args)
     assert result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED
     assert result.decision == Decision.CONFIRM
     assert result.result is None  # Must NOT execute!
 
-    # Now verify with confirmed context
-    confirmed_context = SecurityContext(confirmed_actions=["send_email"])
-    confirmed_result = execute_tool(
-        "send_email",
-        {"recipient": "test@example.com", "message": "Notice"},
-        security_context=confirmed_context,
-    )
-    assert confirmed_result.status == ToolExecutionStatus.SUCCESS
-    assert confirmed_result.result["status"] == "success"
-    assert confirmed_result.result["action"] == "email_sent"
+
+def test_authorization_for_alice_cannot_authorize_bob():
+    """A.2: An authorization for Alice cannot authorize Bob."""
+    alice_args = {"recipient": "alice@example.com", "message": "Notice"}
+    bob_args = {"recipient": "bob@example.com", "message": "Notice"}
+
+    alice_action = canonical_action_id("send_email", alice_args)
+    alice_context = SecurityContext(confirmed_actions=[alice_action])
+
+    bob_result = execute_tool("send_email", bob_args, security_context=alice_context)
+    assert bob_result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED
+    assert bob_result.decision == Decision.CONFIRM
+    assert bob_result.result is None
+
+
+def test_authorization_for_one_message_cannot_authorize_different_message():
+    """A.3: An authorization for one message cannot authorize a different message."""
+    orig_args = {"recipient": "alice@example.com", "message": "Approved message"}
+    tampered_args = {"recipient": "alice@example.com", "message": "Tampered malicious payload"}
+
+    orig_action = canonical_action_id("send_email", orig_args)
+    approved_context = SecurityContext(confirmed_actions=[orig_action])
+
+    tampered_result = execute_tool("send_email", tampered_args, security_context=approved_context)
+    assert tampered_result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED
+    assert tampered_result.decision == Decision.CONFIRM
+    assert tampered_result.result is None
+
+
+def test_exact_matching_authorization_permits_approved_action():
+    """A.4: An exact matching authorization permits only the approved action."""
+    args = {"recipient": "alice@example.com", "message": "Safe notice"}
+    approved_action = canonical_action_id("send_email", args)
+    context = SecurityContext(confirmed_actions=[approved_action])
+
+    result = execute_tool("send_email", args, security_context=context)
+    assert result.status == ToolExecutionStatus.SUCCESS
+    assert result.decision in (Decision.ALLOW, Decision.MONITOR)
+    assert result.result is not None
+    assert result.result["status"] == "success"
+    assert result.result["simulated"] is True
+    assert result.result["recipient"] == "alice@example.com"
+
+
+def test_generic_send_email_authorization_cannot_bypass_scoped_confirmation():
+    """A.5: Generic send_email or recipient-only authorization cannot bypass exact confirmation requirement."""
+    args = {"recipient": "alice@example.com", "message": "Notice"}
+
+    # Generic "send_email" attempt
+    generic_context = SecurityContext(confirmed_actions=["send_email"])
+    gen_result = execute_tool("send_email", args, security_context=generic_context)
+    assert gen_result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED
+    assert gen_result.result is None
+
+    # Recipient-only "send_email:alice@example.com" without message hash attempt
+    recipient_only_context = SecurityContext(confirmed_actions=["send_email:alice@example.com"])
+    rec_result = execute_tool("send_email", args, security_context=recipient_only_context)
+    assert rec_result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED
+    assert rec_result.result is None
+
+
+def test_client_supplied_confirmation_strings_cannot_grant_authorization():
+    """A.6: Client-supplied wildcard or invalid confirmation strings cannot grant authorization."""
+    args = {"recipient": "alice@example.com", "message": "Notice"}
+
+    for invalid_action in ["*", "send_email:*", "send_email:alice@example.com:*", "all_tools"]:
+        context = SecurityContext(confirmed_actions=[invalid_action])
+        result = execute_tool("send_email", args, security_context=context)
+        assert result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED
+        assert result.result is None
+
+
+
+
+def test_authorization_for_one_subject_cannot_authorize_different_subject():
+    """A.7: An authorization for one subject cannot authorize a different subject."""
+    orig_args = {"recipient": "alice@example.com", "message": "Notice", "subject": "Quarterly Update"}
+    tampered_args = {"recipient": "alice@example.com", "message": "Notice", "subject": "Urgent Wire Transfer"}
+
+    orig_action = canonical_action_id("send_email", orig_args)
+    approved_context = SecurityContext(confirmed_actions=[orig_action])
+
+    tampered_result = execute_tool("send_email", tampered_args, security_context=approved_context)
+    assert tampered_result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED
+    assert tampered_result.decision == Decision.CONFIRM
+    assert tampered_result.result is None
+
+
+def test_filename_only_file_read_authorization_cannot_bypass_canonical_confirmation():
+    """A.8: Filename-only or generic file_read authorization cannot bypass canonical confirmation."""
+    args = {"filename": "confidential.txt"}
+
+    # Legacy filename-only "file_read:confidential.txt" must be rejected
+    filename_only_ctx = SecurityContext(confirmed_actions=["file_read:confidential.txt"])
+    fn_result = execute_tool("file_read", args, security_context=filename_only_ctx)
+    assert fn_result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED
+    assert fn_result.result is None
+
+    # Generic "file_read" must be rejected
+    generic_ctx = SecurityContext(confirmed_actions=["file_read"])
+    gen_result = execute_tool("file_read", args, security_context=generic_ctx)
+    assert gen_result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED
+    assert gen_result.result is None
+
+    # Wildcard "file_read:*" must be rejected
+    wildcard_ctx = SecurityContext(confirmed_actions=["file_read:*"])
+    wc_result = execute_tool("file_read", args, security_context=wildcard_ctx)
+    assert wc_result.status == ToolExecutionStatus.CONFIRMATION_REQUIRED
+    assert wc_result.result is None
+
+    # Exact matching canonical action ID must succeed
+    canonical_action = canonical_action_id("file_read", args)
+    exact_ctx = SecurityContext(confirmed_actions=[canonical_action])
+    exact_result = execute_tool("file_read", args, security_context=exact_ctx)
+    assert exact_result.status == ToolExecutionStatus.SUCCESS
+    assert exact_result.result is not None
 
 
 def test_confidential_file_requires_confirmation():
